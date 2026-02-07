@@ -4,9 +4,9 @@ A Pi extension that adds a persistent heads-up display **below the editor** (abo
 
 ## Demo
 
-![Session HUD demo](https://raw.githubusercontent.com/tmustier/pi-session-hud/main/assets/demo.gif)
+![Session HUD demo](https://raw.githubusercontent.com/tmustier/pi-session-hud/v0.1.1/assets/demo.gif)
 
-Full-quality MP4: https://raw.githubusercontent.com/tmustier/pi-session-hud/main/assets/demo.mp4
+Full-quality MP4: https://raw.githubusercontent.com/tmustier/pi-session-hud/v0.1.1/assets/demo.mp4
 
 ## What it shows
 

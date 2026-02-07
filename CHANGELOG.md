@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 - 2026-02-07
+
+- README demo embed (GIF + MP4 hosted on GitHub)
+- Keep npm package small (demo media not included in published tarball)
+
 ## 0.1.0 - 2026-02-07
 
 Initial release.
