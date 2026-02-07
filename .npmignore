@@ -1,0 +1,5 @@
+# Nothing beyond package.json "files" should be published.
+# Kept for clarity.
+*~
+.DS_Store
+node_modules/
