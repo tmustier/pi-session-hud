@@ -2,7 +2,14 @@
 
 A Pi extension that adds a persistent heads-up display **below the editor** (above Pi’s built-in footer).
 
-Shows (in a compact, color-coded bar):
+## Demo
+
+![Session HUD demo](https://raw.githubusercontent.com/tmustier/pi-session-hud/main/assets/demo.gif)
+
+Full-quality MP4: https://raw.githubusercontent.com/tmustier/pi-session-hud/main/assets/demo.mp4
+
+## What it shows
+
 - Activity state (idle / running / tool / error / stale)
 - Session name (or cwd) and first user message fallback
 - Git branch + working tree stats
