@@ -8,6 +8,10 @@ A Pi extension that adds a persistent heads-up display **below the editor** (abo
 
 Full-quality MP4: https://raw.githubusercontent.com/tmustier/pi-session-hud/main/assets/demo.mp4
 
+HUD placement (below editor/input, above footer):
+
+![HUD placement](https://raw.githubusercontent.com/tmustier/pi-session-hud/main/assets/hud-below-video.png)
+
 (Hosted on GitHub so npm users see the media in README, but `npm install` stays small.)
 
 ## What it shows

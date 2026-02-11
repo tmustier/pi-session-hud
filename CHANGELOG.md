@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 - 2026-02-11
+
+- Restore demo GIF/MP4 to the original capture with the HUD visible below the editor
+- Add a static HUD placement screenshot below the demo video in README
+- Continue hosting media on GitHub (not included in npm package files)
+
 ## 0.1.3 - 2026-02-11
 
 - Refresh demo assets from latest screen recording and trim to seconds 1–7

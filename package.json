@@ -1,6 +1,6 @@
 {
   "name": "@tmustier/pi-session-hud",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Persistent session HUD widget for Pi (below-editor bar with git/context/model/activity).",
   "license": "MIT",
   "author": "Thomas Mustier",
