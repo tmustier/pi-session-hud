@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 - 2026-02-11
+
+- Refresh demo assets from latest screen recording and trim to seconds 1–7
+- Update README demo media links to `main` so npm/README renders current assets from GitHub
+- Keep npm package lightweight by continuing to exclude `assets/` from published files
+
 ## 0.1.2 - 2026-02-11
 
 - Add worktree awareness on the main HUD line when a repo has multiple worktrees.
