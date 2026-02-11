@@ -4,15 +4,15 @@ A Pi extension that adds a persistent heads-up display **below the editor** (abo
 
 ## Demo
 
-![Session HUD demo](https://raw.githubusercontent.com/tmustier/pi-session-hud/v0.1.1/assets/demo.gif)
+![Session HUD demo](https://raw.githubusercontent.com/tmustier/pi-session-hud/v0.1.2/assets/demo.gif)
 
-Full-quality MP4: https://raw.githubusercontent.com/tmustier/pi-session-hud/v0.1.1/assets/demo.mp4
+Full-quality MP4: https://raw.githubusercontent.com/tmustier/pi-session-hud/v0.1.2/assets/demo.mp4
 
 ## What it shows
 
 - Activity state (idle / running / tool / error / stale)
 - Session name (or cwd) and first user message fallback
-- Git branch + working tree stats
+- Git branch + worktree marker (`⎇ name current/total` when multiple) + diff stats
 - Context usage (% + tokens)
 - Current model (+ thinking level)
 

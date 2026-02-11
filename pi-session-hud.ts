@@ -4,7 +4,7 @@
  * Shows:
  *   - Activity status with color-coded background (idle/running/tool/error/stale)
  *   - Session name or cwd basename
- *   - Git branch + working tree stats (+added/-removed)
+ *   - Git branch + worktree marker (⎇ name current/total when multiple) + diff stats (+added/-removed)
  *   - Context usage bar (% + token count)
  *   - Current model
  *
@@ -111,6 +111,54 @@ async function getGitStats(pi: ExtensionAPI): Promise<{ added: number; removed: 
 	}
 }
 
+function pathBasename(pathValue: string): string {
+	const trimmed = pathValue.endsWith("/") ? pathValue.slice(0, -1) : pathValue;
+	const parts = trimmed.split("/").filter(Boolean);
+	const lastPart = parts.length > 0 ? parts[parts.length - 1] : "";
+	return lastPart || trimmed || "";
+}
+
+async function getWorktreeInfo(pi: ExtensionAPI): Promise<{ count: number; name: string | null; index: number | null }> {
+	try {
+		const listResult = await pi.exec("git", ["worktree", "list", "--porcelain"], { timeout: 2000 });
+		if (listResult.code !== 0) return { count: 0, name: null, index: null };
+
+		const worktreePaths: string[] = [];
+		for (const line of listResult.stdout.split("\n")) {
+			if (!line.startsWith("worktree ")) continue;
+			const worktreePath = line.slice("worktree ".length).trim();
+			if (worktreePath) worktreePaths.push(worktreePath);
+		}
+
+		const count = worktreePaths.length;
+		if (count <= 1) return { count, name: null, index: null };
+
+		const topLevelResult = await pi.exec("git", ["rev-parse", "--show-toplevel"], { timeout: 2000 });
+		if (topLevelResult.code !== 0) return { count, name: null, index: null };
+		const currentPath = topLevelResult.stdout.trim();
+
+		let zeroBasedIndex = worktreePaths.findIndex((worktreePath) => worktreePath === currentPath);
+		if (zeroBasedIndex < 0) {
+			const currentBase = pathBasename(currentPath);
+			const matchingByBase: number[] = [];
+			for (let i = 0; i < worktreePaths.length; i++) {
+				if (pathBasename(worktreePaths[i]) === currentBase) matchingByBase.push(i);
+			}
+			if (matchingByBase.length === 1) zeroBasedIndex = matchingByBase[0];
+		}
+
+		const gitDirResult = await pi.exec("git", ["rev-parse", "--git-dir"], { timeout: 2000 });
+		const gitDir = gitDirResult.code === 0 ? gitDirResult.stdout.trim() : "";
+		const isMainWorktree = gitDir === ".git" || gitDir.endsWith("/.git");
+		const name = isMainWorktree ? "main" : pathBasename(currentPath) || "linked";
+		const index = zeroBasedIndex >= 0 ? zeroBasedIndex + 1 : null;
+
+		return { count, name, index };
+	} catch {
+		return { count: 0, name: null, index: null };
+	}
+}
+
 // ── Extension ────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -123,6 +171,9 @@ export default function (pi: ExtensionAPI) {
 	let gitAdded = 0;
 	let gitRemoved = 0;
 	let gitDirty = false;
+	let worktreeCount = 0;
+	let worktreeName: string | null = null;
+	let worktreeIndex: number | null = null;
 	let contextPercent = 0;
 	let contextTokens = 0;
 	let contextWindow = 0;
@@ -161,7 +212,7 @@ export default function (pi: ExtensionAPI) {
 			return truncateToWidth(prefixed, width, ellipsis, true) + RESET;
 		};
 
-		// ── Main line: directory (branch): name/message ──
+		// ── Main line: directory (branch) ⎇ worktree-position: name/message ──
 		const home = process.env.HOME || "";
 		const cwd = process.cwd();
 		let displayDir: string;
@@ -190,9 +241,16 @@ export default function (pi: ExtensionAPI) {
 			? ` ${FG_MUTED}(${FG_WHITE}${gitBranch}${FG_MUTED})${FG_RESET}`
 			: "";
 
+		// Medium format: current/total when index is known, fallback to "N wt"
+		const worktreePosition = worktreeIndex !== null ? `${worktreeIndex}/${worktreeCount}` : `${worktreeCount} wt`;
+		const worktreeStyled = (worktreeCount > 1 && worktreeName)
+			? ` ${FG_DIM}⎇${FG_RESET} ${FG_MUTED}${worktreeName}${FG_RESET} ${FG_DIM}${worktreePosition}${FG_RESET}`
+			: "";
+
 		const mainInner =
 			` ${FG_WHITE}${displayDir}${FG_RESET}` +
 			branchStyled +
+			worktreeStyled +
 			`${FG_DIM}: ${FG_RESET}` +
 			`${mainTextStyled}${FG_RESET} `;
 
@@ -241,6 +299,14 @@ export default function (pi: ExtensionAPI) {
 		gitAdded = stats.added;
 		gitRemoved = stats.removed;
 		gitDirty = stats.dirty;
+		widgetTui?.requestRender();
+	}
+
+	async function refreshWorktree() {
+		const info = await getWorktreeInfo(pi);
+		worktreeCount = info.count;
+		worktreeName = info.name;
+		worktreeIndex = info.index;
 		widgetTui?.requestRender();
 	}
 
@@ -302,9 +368,12 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = ctx;
 		model = ctx.model?.id ?? "";
 		firstUserText = extractFirstUserText(ctx);
+		worktreeCount = 0;
+		worktreeName = null;
+		worktreeIndex = null;
 
 		// Remove legacy widget from older versions
-		if (LEGACY_WIDGET_ID !== WIDGET_ID) ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
+		ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
 
 		ctx.ui.setWidget(WIDGET_ID, (tui, theme) => {
 			widgetTui = tui;
@@ -324,17 +393,18 @@ export default function (pi: ExtensionAPI) {
 		refreshContext();
 		refreshGit();
 
-		// Poll git stats every 10s (branch comes from footerData reactively via built-in footer)
+		// Poll git diff stats every 10s (branch/worktree refreshed on install + agent_end)
 		if (gitPollTimer) clearInterval(gitPollTimer);
 		gitPollTimer = setInterval(() => refreshGit(), 10_000);
 
-		// Get initial git branch
+		// Get initial git branch + worktree info
 		pi.exec("git", ["branch", "--show-current"], { timeout: 2000 }).then((r) => {
 			if (r.code === 0) {
 				gitBranch = r.stdout.trim() || "detached";
 				widgetTui?.requestRender();
 			}
 		}).catch(() => {});
+		refreshWorktree();
 	}
 
 	// ── Events ───────────────────────────────────────────────
@@ -357,13 +427,14 @@ export default function (pi: ExtensionAPI) {
 		clearStaleTimer();
 		refreshContext();
 		refreshGit();
-		// Re-poll branch in case it changed
+		// Re-poll branch + worktree in case they changed
 		pi.exec("git", ["branch", "--show-current"], { timeout: 2000 }).then((r) => {
 			if (r.code === 0) {
 				gitBranch = r.stdout.trim() || "detached";
 				widgetTui?.requestRender();
 			}
 		}).catch(() => {});
+		refreshWorktree();
 		widgetTui?.requestRender();
 	});
 
@@ -407,7 +478,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("Session HUD enabled", "info");
 		} else {
 			ctx.ui.setWidget(WIDGET_ID, undefined);
-			if (LEGACY_WIDGET_ID !== WIDGET_ID) ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
+			ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
 			if (gitPollTimer) { clearInterval(gitPollTimer); gitPollTimer = null; }
 			clearStaleTimer();
 			ctx.ui.notify("Session HUD disabled", "info");
