@@ -181,8 +181,8 @@ export default function (pi: ExtensionAPI) {
 	let worktreeCount = 0;
 	let worktreeName: string | null = null;
 	let worktreeIndex: number | null = null;
-	let contextPercent: number | null = 0;
-	let contextTokens: number | null = 0;
+	let contextPercent: number | null = null;
+	let contextTokens: number | null = null;
 	let contextWindow = 0;
 	let model = "";
 
@@ -325,8 +325,8 @@ export default function (pi: ExtensionAPI) {
 			contextTokens = usage.tokens;
 			contextWindow = usage.contextWindow;
 		} else {
-			contextPercent = 0;
-			contextTokens = 0;
+			contextPercent = null;
+			contextTokens = null;
 			contextWindow = currentCtx.model?.contextWindow ?? 0;
 		}
 		model = currentCtx.model?.id ?? "";
