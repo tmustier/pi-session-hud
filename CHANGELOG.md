@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Clamp the context bar fill to the widget width so usage above 100% renders as a full bar instead of crashing
+- Show `?` for unknown context usage/token counts (for example, right after compaction before Pi has fresh usage data)
+
 ## 0.1.4 - 2026-02-11
 
 - Restore demo GIF/MP4 to the original capture with the HUD visible below the editor
