@@ -81,14 +81,21 @@ function fmtTokens(n: number): string {
 	return `${n}`;
 }
 
-function contextBar(percent: number, barWidth: number): string {
-	const filled = Math.round((percent / 100) * barWidth);
+function clamp(n: number, min: number, max: number): number {
+	return Math.min(Math.max(n, min), max);
+}
+
+function contextBar(percent: number | null, barWidth: number): string {
+	if (percent === null) return `${FG_DIM}${"░".repeat(barWidth)}`;
+
+	const clampedPercent = clamp(percent, 0, 100);
+	const filled = clamp(Math.round((clampedPercent / 100) * barWidth), 0, barWidth);
 	const empty = barWidth - filled;
 	let barFg: string;
-	if (percent < 25) barFg = "\x1b[38;2;100;200;120m";       // green — great
-	else if (percent < 40) barFg = "\x1b[38;2;180;210;100m";   // yellow-green — fine
-	else if (percent < 60) barFg = "\x1b[38;2;220;180;60m";    // amber — meh
-	else barFg = "\x1b[38;2;240;80;80m";                       // red — bad
+	if (clampedPercent < 25) barFg = "\x1b[38;2;100;200;120m";       // green — great
+	else if (clampedPercent < 40) barFg = "\x1b[38;2;180;210;100m";   // yellow-green — fine
+	else if (clampedPercent < 60) barFg = "\x1b[38;2;220;180;60m";    // amber — meh
+	else barFg = "\x1b[38;2;240;80;80m";                              // red — bad
 	return `${barFg}${"█".repeat(filled)}${FG_DIM}${"░".repeat(empty)}`;
 }
 
@@ -174,8 +181,8 @@ export default function (pi: ExtensionAPI) {
 	let worktreeCount = 0;
 	let worktreeName: string | null = null;
 	let worktreeIndex: number | null = null;
-	let contextPercent = 0;
-	let contextTokens = 0;
+	let contextPercent: number | null = 0;
+	let contextTokens: number | null = 0;
 	let contextWindow = 0;
 	let model = "";
 
@@ -259,8 +266,8 @@ export default function (pi: ExtensionAPI) {
 		// ── Context line: context % ... │ model + thinking ──
 		const ctxParts: string[] = [];
 		const bar = contextBar(contextPercent, 6);
-		const pct = `${Math.round(contextPercent)}%`;
-		const tok = `${fmtTokens(contextTokens)}/${fmtTokens(contextWindow)}`;
+		const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
+		const tok = contextTokens === null ? `?/${fmtTokens(contextWindow)}` : `${fmtTokens(contextTokens)}/${fmtTokens(contextWindow)}`;
 		ctxParts.push(` ${bar}${FG_RESET} ${FG_WHITE}${pct}${FG_RESET} ${FG_MUTED}${tok}${FG_RESET} `);
 		if (model) {
 			const thinking = pi.getThinkingLevel();
@@ -317,6 +324,10 @@ export default function (pi: ExtensionAPI) {
 			contextPercent = usage.percent;
 			contextTokens = usage.tokens;
 			contextWindow = usage.contextWindow;
+		} else {
+			contextPercent = 0;
+			contextTokens = 0;
+			contextWindow = currentCtx.model?.contextWindow ?? 0;
 		}
 		model = currentCtx.model?.id ?? "";
 	}
