@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.5 - 2026-03-12
+
 - Clamp the context bar fill to the widget width so usage above 100% renders as a full bar instead of crashing
 - Show `?` for unknown context usage/token counts (for example, right after compaction before Pi has fresh usage data)
 
