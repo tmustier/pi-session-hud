@@ -193,10 +193,39 @@ export default function (pi: ExtensionAPI) {
 	let widgetTui: any = null;
 	let widgetTheme: any = null;
 	let firstUserText: string | null = null;
+	// Flag flipped in the widget's dispose() — used to short-circuit renders and
+	// polling callbacks that would otherwise call into a stale ExtensionAPI.
+	let disposed = false;
+
+	/**
+	 * During /resume, pi core invalidates the old extension's ExtensionAPI
+	 * BEFORE the old widget is disposed or replaced. Any call to pi.* in that
+	 * window throws "This extension instance is stale...". Use this helper to
+	 * swallow that specific error so our render loop and pollers stay quiet
+	 * until the new session's install() takes over the widget.
+	 */
+	function isStaleExtensionError(err: unknown): boolean {
+		const message = err instanceof Error ? err.message : String(err ?? "");
+		return message.includes("stale after session replacement");
+	}
 
 	// ── Render ───────────────────────────────────────────────
 
 	function renderBar(width: number): string[] {
+		// Widget was disposed (session teardown in progress) — emit nothing.
+		if (disposed) return [""];
+		try {
+			return renderBarUnsafe(width);
+		} catch (err) {
+			if (isStaleExtensionError(err)) {
+				// Session is mid-replacement; a fresh widget will replace us shortly.
+				return [""];
+			}
+			throw err;
+		}
+	}
+
+	function renderBarUnsafe(width: number): string[] {
 		const bg = STATUS_BG[status];
 		const sFg = STATUS_FG[status];
 		const icon = STATUS_ICON[status];
@@ -302,19 +331,33 @@ export default function (pi: ExtensionAPI) {
 	// ── Data refresh ─────────────────────────────────────────
 
 	async function refreshGit() {
-		const stats = await getGitStats(pi);
-		gitAdded = stats.added;
-		gitRemoved = stats.removed;
-		gitDirty = stats.dirty;
-		widgetTui?.requestRender();
+		if (disposed) return;
+		try {
+			const stats = await getGitStats(pi);
+			if (disposed) return;
+			gitAdded = stats.added;
+			gitRemoved = stats.removed;
+			gitDirty = stats.dirty;
+			widgetTui?.requestRender();
+		} catch (err) {
+			if (isStaleExtensionError(err)) return;
+			throw err;
+		}
 	}
 
 	async function refreshWorktree() {
-		const info = await getWorktreeInfo(pi);
-		worktreeCount = info.count;
-		worktreeName = info.name;
-		worktreeIndex = info.index;
-		widgetTui?.requestRender();
+		if (disposed) return;
+		try {
+			const info = await getWorktreeInfo(pi);
+			if (disposed) return;
+			worktreeCount = info.count;
+			worktreeName = info.name;
+			worktreeIndex = info.index;
+			widgetTui?.requestRender();
+		} catch (err) {
+			if (isStaleExtensionError(err)) return;
+			throw err;
+		}
 	}
 
 	function refreshContext() {
@@ -386,6 +429,10 @@ export default function (pi: ExtensionAPI) {
 		// Remove legacy widget from older versions
 		ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
 
+		// We're installing a fresh widget — clear the disposed flag so the new
+		// render callback (closed over the same module scope) is live again.
+		disposed = false;
+
 		ctx.ui.setWidget(WIDGET_ID, (tui, theme) => {
 			widgetTui = tui;
 			widgetTheme = theme;
@@ -393,6 +440,7 @@ export default function (pi: ExtensionAPI) {
 				render: (width: number) => renderBar(width),
 				invalidate() {},
 				dispose() {
+					disposed = true;
 					if (gitPollTimer) { clearInterval(gitPollTimer); gitPollTimer = null; }
 					clearStaleTimer();
 					widgetTui = null;
@@ -410,11 +458,15 @@ export default function (pi: ExtensionAPI) {
 
 		// Get initial git branch + worktree info
 		pi.exec("git", ["branch", "--show-current"], { timeout: 2000 }).then((r) => {
+			if (disposed) return;
 			if (r.code === 0) {
 				gitBranch = r.stdout.trim() || "detached";
 				widgetTui?.requestRender();
 			}
-		}).catch(() => {});
+		}).catch((err) => {
+			if (isStaleExtensionError(err)) return;
+			// Any other error: git not installed, not a repo, timeout — ignore quietly.
+		});
 		refreshWorktree();
 	}
 

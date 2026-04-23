@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.6 - 2026-04-23
+
+- Fix crash during `/resume`: the HUD's render callback (and its git/worktree pollers) now survive the brief window where pi core has invalidated the old extension runtime but hasn't yet replaced the widget, instead of throwing `Error: This extension instance is stale after session replacement or reload.` out of the TUI render timer
+- `renderBar` short-circuits to an empty render when the widget is disposed or the ExtensionAPI is stale
+- `refreshGit` / `refreshWorktree` / initial git branch probe now swallow the same stale-extension error
+
 ## 0.1.5 - 2026-03-12
 
 - Clamp the context bar fill to the widget width so usage above 100% renders as a full bar instead of crashing
