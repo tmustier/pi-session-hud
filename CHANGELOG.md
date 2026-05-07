@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.7] - 2026-05-07
+
+### Changed
+- Update Pi extension imports to the new `@earendil-works` namespace.
+
 ## Unreleased
 
 ## 0.1.6 - 2026-04-23
