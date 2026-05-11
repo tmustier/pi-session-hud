@@ -43,6 +43,7 @@ const STATUS_FG: Record<Status, string> = {
 };
 
 const RESET = "\x1b[0m";
+const HARD_RESET_RE = /\x1b\[0m/g;
 
 const BOLD = "\x1b[1m";
 const BOLD_OFF = "\x1b[22m";
@@ -242,10 +243,19 @@ export default function (pi: ExtensionAPI) {
 		const sep = `${FG_DIM}│${FG_RESET}`;
 
 		const padBgLine = (prefixed: string): string => {
-			// truncateToWidth() injects a hard reset (\x1b[0m) before its ellipsis.
-			// That would clear our background. So ellipsis re-applies bg.
+			if (width <= 0) return "";
+
+			// truncateToWidth() injects a hard reset (\x1b[0m) around its
+			// ellipsis. If we ask it to pad too, any padding after that reset is
+			// rendered without our HUD background, which is visible on narrow
+			// terminals (especially when a wide grapheme is clipped at the edge).
+			// Truncate first, then re-apply the background after every hard reset
+			// and do our own background-coloured right padding.
 			const ellipsis = `${bg}…${FG_RESET}`;
-			return truncateToWidth(prefixed, width, ellipsis, true) + RESET;
+			const truncated = truncateToWidth(prefixed, width, ellipsis, false);
+			const bgRestored = truncated.replace(HARD_RESET_RE, `${RESET}${bg}`);
+			const padding = " ".repeat(Math.max(0, width - visibleWidth(bgRestored)));
+			return `${bgRestored}${bg}${padding}${RESET}`;
 		};
 
 		// ── Main line: directory (branch) ⎇ worktree-position: name/message ──
@@ -306,24 +316,25 @@ export default function (pi: ExtensionAPI) {
 		const lineContext = padBgLine(`${bg}${ctxParts.join(sep)}`);
 
 		// ── Status line: STATUS (+/-) ──
-		const STATUS_LABEL_WIDTH = 10;
-		const labelTrunc = truncateToWidth(label, STATUS_LABEL_WIDTH, "…");
-		const labelPad = labelTrunc + " ".repeat(Math.max(0, STATUS_LABEL_WIDTH - visibleWidth(labelTrunc)));
-		let statusInner = ` ${sFg}${BOLD}${icon} ${labelPad}${BOLD_OFF}${FG_RESET}`;
-
 		// Git diff stats next to status
 		const diffParts: string[] = [];
 		if (gitAdded > 0) diffParts.push(`\x1b[38;2;100;200;120m+${gitAdded}${FG_RESET}`);
 		if (gitRemoved > 0) diffParts.push(`\x1b[38;2;240;100;100m-${gitRemoved}${FG_RESET}`);
 		if (gitDirty && gitAdded === 0 && gitRemoved === 0) diffParts.push(`${FG_MUTED}~${FG_RESET}`);
-		if (diffParts.length) {
-			statusInner += `  ${diffParts.join(" ")}`;
-		}
-		statusInner += " ";
+
+		const STATUS_LABEL_MIN_WIDTH = 10;
+		const diffSuffix = diffParts.length ? `  ${diffParts.join(" ")}` : "";
+		const reservedStatusWidth = 1 + visibleWidth(icon) + 1 + visibleWidth(diffSuffix) + 1;
+		const maxLabelWidth = Math.max(1, width - reservedStatusWidth);
+		const desiredLabelWidth = Math.max(STATUS_LABEL_MIN_WIDTH, visibleWidth(label));
+		const labelWidth = clamp(desiredLabelWidth, 1, maxLabelWidth);
+		const labelTrunc = truncateToWidth(label, labelWidth, "…");
+		const labelPad = labelTrunc + " ".repeat(Math.max(0, labelWidth - visibleWidth(labelTrunc)));
+		const statusInner = ` ${sFg}${BOLD}${icon} ${labelPad}${BOLD_OFF}${FG_RESET}${diffSuffix} `;
 		const lineStatus = padBgLine(`${bg}${statusInner}`);
 
 		// Padding lines: just spaces, exactly width chars
-		const emptyLine = truncateToWidth(`${bg}${" ".repeat(width)}${RESET}`, width);
+		const emptyLine = width > 0 ? `${bg}${" ".repeat(width)}${RESET}` : "";
 
 		return [emptyLine, lineMain, lineContext, lineStatus, emptyLine, ""];
 	}
