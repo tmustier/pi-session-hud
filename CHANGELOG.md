@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- Preserve the HUD background fill on truncated lines in narrow terminals by padding after truncation with the status background reapplied, including after hard ANSI resets emitted by `truncateToWidth()`.
+- Let the status label widen with the terminal instead of always truncating to 10 columns, so stale tool labels such as `subagent 38s` reappear after expanding the terminal.
+
 ## 0.1.6 - 2026-04-23
 
 - Fix crash during `/resume`: the HUD's render callback (and its git/worktree pollers) now survive the brief window where pi core has invalidated the old extension runtime but hasn't yet replaced the widget, instead of throwing `Error: This extension instance is stale after session replacement or reload.` out of the TUI render timer
