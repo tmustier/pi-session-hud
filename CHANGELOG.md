@@ -12,6 +12,7 @@
 - Let the status label widen with the terminal instead of always truncating to 10 columns, so stale tool labels such as `subagent 38s` reappear after expanding the terminal.
 - Make context-bar colours on larger-than-GPT-5.5 context windows warn at roughly GPT-5.5-equivalent token counts, so 1M-token models stop staying green/yellow for too long.
 - Apply the same context warning scale to the used-token count while keeping the percentage and `/context-window` suffix muted grey.
+- Add configurable context colour bands via `pi-session-hud.json`, including absolute-token or percentage modes plus provider/model overrides.
 - Reset HUD status from the current `session_start` event instead of the obsolete `session_switch` hook.
 
 ## 0.1.6 - 2026-04-23
