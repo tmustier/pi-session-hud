@@ -10,6 +10,8 @@
 
 - Preserve the HUD background fill on truncated lines in narrow terminals by padding after truncation with the status background reapplied, including after hard ANSI resets emitted by `truncateToWidth()`.
 - Let the status label widen with the terminal instead of always truncating to 10 columns, so stale tool labels such as `subagent 38s` reappear after expanding the terminal.
+- Make context-bar colours on larger-than-GPT-5.5 context windows warn at roughly GPT-5.5-equivalent token counts, so 1M-token models stop staying green/yellow for too long.
+- Reset HUD status from the current `session_start` event instead of the obsolete `session_switch` hook.
 
 ## 0.1.6 - 2026-04-23
 

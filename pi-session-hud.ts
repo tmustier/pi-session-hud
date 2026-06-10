@@ -58,6 +58,11 @@ const FG_WHITE = "\x1b[38;2;220;220;220m";
 const FG_MUTED = "\x1b[38;2;140;140;140m";
 const FG_DIM = "\x1b[38;2;90;90;90m";
 
+// Keep colour warnings anchored to GPT-5.5's context window. For 1M+
+// context models, the fill still reflects the true model window, but the
+// colour changes at roughly the same absolute token counts as GPT-5.5.
+const CONTEXT_COLOR_REFERENCE_WINDOW = 272_000;
+
 const STATUS_ICON: Record<Status, string> = {
 	idle:    "●",
 	running: "◉",
@@ -86,17 +91,28 @@ function clamp(n: number, min: number, max: number): number {
 	return Math.min(Math.max(n, min), max);
 }
 
-function contextBar(percent: number | null, barWidth: number): string {
+function contextColorPercent(percent: number, tokens: number | null, contextWindow: number): number {
+	const clampedPercent = clamp(percent, 0, 100);
+	if (contextWindow <= CONTEXT_COLOR_REFERENCE_WINDOW) return clampedPercent;
+
+	const effectiveTokens = tokens ?? (contextWindow > 0 ? (clampedPercent / 100) * contextWindow : null);
+	if (effectiveTokens === null) return clampedPercent;
+
+	return clamp((effectiveTokens / CONTEXT_COLOR_REFERENCE_WINDOW) * 100, 0, 100);
+}
+
+function contextBar(percent: number | null, barWidth: number, tokens: number | null = null, contextWindow = 0): string {
 	if (percent === null) return `${FG_DIM}${"░".repeat(barWidth)}`;
 
 	const clampedPercent = clamp(percent, 0, 100);
+	const colorPercent = contextColorPercent(clampedPercent, tokens, contextWindow);
 	const filled = clamp(Math.round((clampedPercent / 100) * barWidth), 0, barWidth);
 	const empty = barWidth - filled;
 	let barFg: string;
-	if (clampedPercent < 25) barFg = "\x1b[38;2;100;200;120m";       // green — great
-	else if (clampedPercent < 40) barFg = "\x1b[38;2;180;210;100m";   // yellow-green — fine
-	else if (clampedPercent < 60) barFg = "\x1b[38;2;220;180;60m";    // amber — meh
-	else barFg = "\x1b[38;2;240;80;80m";                              // red — bad
+	if (colorPercent < 25) barFg = "\x1b[38;2;100;200;120m";       // green — great
+	else if (colorPercent < 40) barFg = "\x1b[38;2;180;210;100m";   // yellow-green — fine
+	else if (colorPercent < 60) barFg = "\x1b[38;2;220;180;60m";    // amber — meh
+	else barFg = "\x1b[38;2;240;80;80m";                            // red — bad
 	return `${barFg}${"█".repeat(filled)}${FG_DIM}${"░".repeat(empty)}`;
 }
 
@@ -304,7 +320,7 @@ export default function (pi: ExtensionAPI) {
 
 		// ── Context line: context % ... │ model + thinking ──
 		const ctxParts: string[] = [];
-		const bar = contextBar(contextPercent, 6);
+		const bar = contextBar(contextPercent, 6, contextTokens, contextWindow);
 		const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
 		const tok = contextTokens === null ? `?/${fmtTokens(contextWindow)}` : `${fmtTokens(contextTokens)}/${fmtTokens(contextWindow)}`;
 		ctxParts.push(` ${bar}${FG_RESET} ${FG_WHITE}${pct}${FG_RESET} ${FG_MUTED}${tok}${FG_RESET} `);
@@ -483,8 +499,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Events ───────────────────────────────────────────────
 
-	pi.on("session_start", async (_event, ctx) => { install(ctx); });
-	pi.on("session_switch", async (_event, ctx) => { status = "idle"; install(ctx); });
+	pi.on("session_start", async (_event, ctx) => { status = "idle"; install(ctx); });
 
 	pi.on("agent_start", async (_event, ctx) => {
 		currentCtx = ctx;
