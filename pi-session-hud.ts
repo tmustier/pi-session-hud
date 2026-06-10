@@ -14,12 +14,41 @@
  * Toggle: /hud (aliases: /status, /header)
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 // ── Types ────────────────────────────────────────────────────
 
 type Status = "idle" | "running" | "tool" | "error" | "stale";
+type ContextBandMode = "absolute" | "percent";
+type ContextBandName = "healthy" | "yellow" | "amber" | "red";
+type ContextBandLevelName = "yellow" | "amber" | "red";
+type ContextBandLevels = Record<ContextBandLevelName, number>;
+
+type ContextBandSpec = {
+	mode?: unknown;
+	levels?: unknown;
+	yellow?: unknown;
+	amber?: unknown;
+	red?: unknown;
+};
+
+type ContextBandRootConfig = ContextBandSpec & {
+	default?: unknown;
+	providers?: unknown;
+	models?: unknown;
+};
+
+type ResolvedContextBandConfig = {
+	mode: ContextBandMode;
+	levels: ContextBandLevels;
+	// Built-in absolute defaults preserve the existing behaviour: GPT-5.5-sized
+	// warning token counts on large windows, scaled down on smaller windows.
+	// Explicit absolute levels from config are used as literal token counts.
+	scaleDownToContextWindow: boolean;
+};
 
 const WIDGET_ID = "pi-session-hud";
 const LEGACY_WIDGET_ID = "pi-status-bar";
@@ -58,10 +87,22 @@ const FG_WHITE = "\x1b[38;2;220;220;220m";
 const FG_MUTED = "\x1b[38;2;140;140;140m";
 const FG_DIM = "\x1b[38;2;90;90;90m";
 
-// Keep colour warnings anchored to GPT-5.5's context window. For 1M+
+// Default colour warnings are anchored to GPT-5.5's context window. For 1M+
 // context models, the fill still reflects the true model window, but the
 // colour changes at roughly the same absolute token counts as GPT-5.5.
 const CONTEXT_COLOR_REFERENCE_WINDOW = 272_000;
+const CONTEXT_DEFAULT_PERCENT_LEVELS: ContextBandLevels = { yellow: 25, amber: 40, red: 60 };
+const CONTEXT_DEFAULT_ABSOLUTE_LEVELS: ContextBandLevels = {
+	yellow: CONTEXT_COLOR_REFERENCE_WINDOW * (CONTEXT_DEFAULT_PERCENT_LEVELS.yellow / 100),
+	amber: CONTEXT_COLOR_REFERENCE_WINDOW * (CONTEXT_DEFAULT_PERCENT_LEVELS.amber / 100),
+	red: CONTEXT_COLOR_REFERENCE_WINDOW * (CONTEXT_DEFAULT_PERCENT_LEVELS.red / 100),
+};
+const DEFAULT_CONTEXT_BAND_CONFIG: ResolvedContextBandConfig = {
+	mode: "absolute",
+	levels: CONTEXT_DEFAULT_ABSOLUTE_LEVELS,
+	scaleDownToContextWindow: true,
+};
+const CONTEXT_CONFIG_FILE_NAME = "pi-session-hud.json";
 const CONTEXT_GREEN = "\x1b[38;2;100;200;120m";        // green — great
 const CONTEXT_YELLOW_GREEN = "\x1b[38;2;180;210;100m"; // yellow-green — fine
 const CONTEXT_AMBER = "\x1b[38;2;220;180;60m";         // amber — meh
@@ -95,38 +136,216 @@ function clamp(n: number, min: number, max: number): number {
 	return Math.min(Math.max(n, min), max);
 }
 
-function contextColorPercent(percent: number, tokens: number | null, contextWindow: number): number {
-	const clampedPercent = clamp(percent, 0, 100);
-	if (contextWindow <= CONTEXT_COLOR_REFERENCE_WINDOW) return clampedPercent;
-
-	const effectiveTokens = tokens ?? (contextWindow > 0 ? (clampedPercent / 100) * contextWindow : null);
-	if (effectiveTokens === null) return clampedPercent;
-
-	return clamp((effectiveTokens / CONTEXT_COLOR_REFERENCE_WINDOW) * 100, 0, 100);
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function contextColorForPercent(colorPercent: number): string {
-	if (colorPercent < 25) return CONTEXT_GREEN;
-	if (colorPercent < 40) return CONTEXT_YELLOW_GREEN;
-	if (colorPercent < 60) return CONTEXT_AMBER;
-	return CONTEXT_RED;
+function parseContextBandMode(value: unknown): ContextBandMode | null {
+	return value === "absolute" || value === "percent" ? value : null;
 }
 
-function contextWarningTextColor(percent: number | null, tokens: number | null, contextWindow: number): string {
-	if (percent === null) return FG_MUTED;
-	const colorPercent = contextColorPercent(percent, tokens, contextWindow);
-	return colorPercent < 25 ? FG_MUTED : contextColorForPercent(colorPercent);
+function parseLevelValue(value: unknown): number | null {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value !== "string") return null;
+
+	const trimmed = value.trim().toLowerCase();
+	const match = trimmed.match(/^(\d+(?:\.\d+)?)\s*(k|m|%)?$/);
+	if (!match) return null;
+
+	const numeric = Number(match[1]);
+	if (!Number.isFinite(numeric)) return null;
+
+	const suffix = match[2];
+	if (suffix === "k") return numeric * 1_000;
+	if (suffix === "m") return numeric * 1_000_000;
+	return numeric;
 }
 
-function contextBar(percent: number | null, barWidth: number, tokens: number | null = null, contextWindow = 0): string {
+function defaultLevelsForMode(mode: ContextBandMode): ContextBandLevels {
+	return mode === "absolute"
+		? { ...CONTEXT_DEFAULT_ABSOLUTE_LEVELS }
+		: { ...CONTEXT_DEFAULT_PERCENT_LEVELS };
+}
+
+function clampLevelsForMode(mode: ContextBandMode, levels: ContextBandLevels): ContextBandLevels {
+	const max = mode === "percent" ? 100 : Number.POSITIVE_INFINITY;
+	const yellow = clamp(levels.yellow, 0, max);
+	const amber = clamp(Math.max(levels.amber, yellow), 0, max);
+	const red = clamp(Math.max(levels.red, amber), 0, max);
+	return { yellow, amber, red };
+}
+
+function getSpecLevels(spec: ContextBandSpec, mode: ContextBandMode): Partial<ContextBandLevels> | null {
+	const levelsSource = isRecord(spec.levels) ? spec.levels : spec;
+	const parsed: Partial<ContextBandLevels> = {};
+	let hasAny = false;
+	for (const key of ["yellow", "amber", "red"] as const) {
+		const value = parseLevelValue(levelsSource[key]);
+		if (value === null) continue;
+		parsed[key] = mode === "percent" ? clamp(value, 0, 100) : Math.max(0, value);
+		hasAny = true;
+	}
+	return hasAny ? parsed : null;
+}
+
+function applyContextBandSpec(
+	base: ResolvedContextBandConfig,
+	spec: ContextBandSpec | undefined,
+): ResolvedContextBandConfig {
+	if (!spec || !isRecord(spec)) return base;
+
+	const parsedMode = parseContextBandMode(spec.mode);
+	const mode = parsedMode ?? base.mode;
+	const modeChanged = mode !== base.mode;
+	const levels = modeChanged ? defaultLevelsForMode(mode) : { ...base.levels };
+	let scaleDownToContextWindow = modeChanged
+		? mode === "absolute"
+		: base.scaleDownToContextWindow;
+
+	const explicitLevels = getSpecLevels(spec, mode);
+	if (explicitLevels) {
+		Object.assign(levels, explicitLevels);
+		// A user-provided absolute level is a literal token count, not a GPT-5.5
+		// reference-window default that should be scaled down on smaller models.
+		if (mode === "absolute") scaleDownToContextWindow = false;
+	}
+
+	return {
+		mode,
+		levels: clampLevelsForMode(mode, levels),
+		scaleDownToContextWindow,
+	};
+}
+
+function getDefaultSpec(config: ContextBandRootConfig): ContextBandSpec | undefined {
+	if (isRecord(config.default)) return config.default as ContextBandSpec;
+	if (config.mode !== undefined || config.levels !== undefined ||
+		config.yellow !== undefined || config.amber !== undefined || config.red !== undefined) {
+		return config;
+	}
+	return undefined;
+}
+
+function lookupOverride(config: ContextBandRootConfig, key: "providers" | "models", names: string[]): ContextBandSpec | undefined {
+	const overrides = config[key];
+	if (!isRecord(overrides)) return undefined;
+	for (const name of names) {
+		const value = overrides[name];
+		if (isRecord(value)) return value as ContextBandSpec;
+	}
+	return undefined;
+}
+
+function resolveContextBandConfig(
+	configs: ContextBandRootConfig[],
+	provider: string,
+	modelId: string,
+): ResolvedContextBandConfig {
+	let resolved = DEFAULT_CONTEXT_BAND_CONFIG;
+	for (const config of configs) {
+		resolved = applyContextBandSpec(resolved, getDefaultSpec(config));
+		resolved = applyContextBandSpec(resolved, lookupOverride(config, "providers", [provider]));
+		resolved = applyContextBandSpec(resolved, lookupOverride(config, "models", [`${provider}/${modelId}`, modelId]));
+	}
+	return resolved;
+}
+
+function effectiveContextBandLevels(config: ResolvedContextBandConfig, contextWindow: number): ContextBandLevels {
+	if (config.mode !== "absolute" || !config.scaleDownToContextWindow ||
+		contextWindow <= 0 || contextWindow >= CONTEXT_COLOR_REFERENCE_WINDOW) {
+		return config.levels;
+	}
+
+	const scale = contextWindow / CONTEXT_COLOR_REFERENCE_WINDOW;
+	return {
+		yellow: config.levels.yellow * scale,
+		amber: config.levels.amber * scale,
+		red: config.levels.red * scale,
+	};
+}
+
+function contextMetricValue(
+	percent: number | null,
+	tokens: number | null,
+	contextWindow: number,
+	config: ResolvedContextBandConfig,
+): number | null {
+	if (percent === null) return null;
+	if (config.mode === "percent") return clamp(percent, 0, 100);
+	if (tokens !== null) return Math.max(0, tokens);
+	return contextWindow > 0 ? (clamp(percent, 0, 100) / 100) * contextWindow : null;
+}
+
+function contextBand(
+	percent: number | null,
+	tokens: number | null,
+	contextWindow: number,
+	config: ResolvedContextBandConfig,
+): ContextBandName {
+	const value = contextMetricValue(percent, tokens, contextWindow, config);
+	if (value === null) return "healthy";
+
+	const levels = effectiveContextBandLevels(config, contextWindow);
+	if (value >= levels.red) return "red";
+	if (value >= levels.amber) return "amber";
+	if (value >= levels.yellow) return "yellow";
+	return "healthy";
+}
+
+function contextColorForBand(band: ContextBandName): string {
+	if (band === "yellow") return CONTEXT_YELLOW_GREEN;
+	if (band === "amber") return CONTEXT_AMBER;
+	if (band === "red") return CONTEXT_RED;
+	return CONTEXT_GREEN;
+}
+
+function contextWarningTextColor(band: ContextBandName): string {
+	return band === "healthy" ? FG_MUTED : contextColorForBand(band);
+}
+
+function contextBar(percent: number | null, barWidth: number, band: ContextBandName): string {
 	if (percent === null) return `${FG_DIM}${"░".repeat(barWidth)}`;
 
 	const clampedPercent = clamp(percent, 0, 100);
-	const colorPercent = contextColorPercent(clampedPercent, tokens, contextWindow);
 	const filled = clamp(Math.round((clampedPercent / 100) * barWidth), 0, barWidth);
 	const empty = barWidth - filled;
-	const barFg = contextColorForPercent(colorPercent);
-	return `${barFg}${"█".repeat(filled)}${FG_DIM}${"░".repeat(empty)}`;
+	return `${contextColorForBand(band)}${"█".repeat(filled)}${FG_DIM}${"░".repeat(empty)}`;
+}
+
+function expandHome(filePath: string): string {
+	if (!filePath.startsWith("~")) return filePath;
+	const home = process.env.HOME;
+	if (!home) return filePath;
+	if (filePath === "~") return home;
+	if (filePath.startsWith("~/")) return join(home, filePath.slice(2));
+	return filePath;
+}
+
+function readContextBandConfigFile(filePath: string): ContextBandRootConfig | null {
+	try {
+		if (!existsSync(filePath)) return null;
+		const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+		const candidate = isRecord(parsed.contextBands) ? parsed.contextBands : parsed;
+		return isRecord(candidate) ? candidate as ContextBandRootConfig : null;
+	} catch {
+		return null;
+	}
+}
+
+function loadContextBandConfigs(ctx: ExtensionContext): ContextBandRootConfig[] {
+	const paths: string[] = [];
+	const home = process.env.HOME;
+	if (home) paths.push(join(home, ".pi", "agent", CONTEXT_CONFIG_FILE_NAME));
+
+	const isProjectTrusted = typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
+	if (isProjectTrusted) paths.push(join(ctx.cwd, ".pi", CONTEXT_CONFIG_FILE_NAME));
+
+	const envConfigPath = process.env.PI_SESSION_HUD_CONFIG;
+	if (envConfigPath) paths.push(resolve(expandHome(envConfigPath)));
+
+	return paths
+		.map(readContextBandConfigFile)
+		.filter((config): config is ContextBandRootConfig => config !== null);
 }
 
 async function getGitStats(pi: ExtensionAPI): Promise<{ added: number; removed: number; dirty: boolean }> {
@@ -215,6 +434,8 @@ export default function (pi: ExtensionAPI) {
 	let contextTokens: number | null = null;
 	let contextWindow = 0;
 	let model = "";
+	let modelProvider = "";
+	let contextBandConfigs: ContextBandRootConfig[] = [];
 
 	let currentCtx: ExtensionContext | null = null;
 	let gitPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -333,12 +554,15 @@ export default function (pi: ExtensionAPI) {
 
 		// ── Context line: context % ... │ model + thinking ──
 		const ctxParts: string[] = [];
-		const bar = contextBar(contextPercent, 6, contextTokens, contextWindow);
+		const contextBands = resolveContextBandConfig(contextBandConfigs, modelProvider, model);
+		const band = contextBand(contextPercent, contextTokens, contextWindow, contextBands);
+		const bar = contextBar(contextPercent, 6, band);
 		const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
 		const tokUsed = contextTokens === null ? "?" : fmtTokens(contextTokens);
 		const tokWindow = fmtTokens(contextWindow);
-		const tokFg = contextWarningTextColor(contextPercent, contextTokens, contextWindow);
-		ctxParts.push(` ${bar}${FG_RESET} ${FG_MUTED}${pct}${FG_RESET} ${tokFg}${tokUsed}${FG_RESET}${FG_MUTED}/${tokWindow}${FG_RESET} `);
+		const pctFg = contextBands.mode === "percent" ? contextWarningTextColor(band) : FG_MUTED;
+		const tokFg = contextBands.mode === "absolute" ? contextWarningTextColor(band) : FG_MUTED;
+		ctxParts.push(` ${bar}${FG_RESET} ${pctFg}${pct}${FG_RESET} ${tokFg}${tokUsed}${FG_RESET}${FG_MUTED}/${tokWindow}${FG_RESET} `);
 		if (model) {
 			const thinking = pi.getThinkingLevel();
 			const thinkingStr = thinking !== "off" ? ` ${FG_MUTED}• ${thinking}${FG_RESET}` : "";
@@ -415,6 +639,7 @@ export default function (pi: ExtensionAPI) {
 			contextWindow = currentCtx.model?.contextWindow ?? 0;
 		}
 		model = currentCtx.model?.id ?? "";
+		modelProvider = currentCtx.model?.provider ?? "";
 	}
 
 	function clearStaleTimer() {
@@ -463,6 +688,8 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI || !enabled) return;
 		currentCtx = ctx;
 		model = ctx.model?.id ?? "";
+		modelProvider = ctx.model?.provider ?? "";
+		contextBandConfigs = loadContextBandConfigs(ctx);
 		firstUserText = extractFirstUserText(ctx);
 		worktreeCount = 0;
 		worktreeName = null;
@@ -570,6 +797,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("model_select", async (event, ctx) => {
 		currentCtx = ctx;
 		model = event.model.id;
+		modelProvider = event.model.provider;
 		widgetTui?.requestRender();
 	});
 
