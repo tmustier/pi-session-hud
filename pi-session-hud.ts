@@ -338,7 +338,7 @@ export default function (pi: ExtensionAPI) {
 		const tokUsed = contextTokens === null ? "?" : fmtTokens(contextTokens);
 		const tokWindow = fmtTokens(contextWindow);
 		const tokFg = contextWarningTextColor(contextPercent, contextTokens, contextWindow);
-		ctxParts.push(` ${bar}${FG_RESET} ${FG_WHITE}${pct}${FG_RESET} ${tokFg}${tokUsed}${FG_RESET}${FG_MUTED}/${tokWindow}${FG_RESET} `);
+		ctxParts.push(` ${bar}${FG_RESET} ${FG_MUTED}${pct}${FG_RESET} ${tokFg}${tokUsed}${FG_RESET}${FG_MUTED}/${tokWindow}${FG_RESET} `);
 		if (model) {
 			const thinking = pi.getThinkingLevel();
 			const thinkingStr = thinking !== "off" ? ` ${FG_MUTED}• ${thinking}${FG_RESET}` : "";
