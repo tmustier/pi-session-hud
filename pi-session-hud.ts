@@ -62,6 +62,10 @@ const FG_DIM = "\x1b[38;2;90;90;90m";
 // context models, the fill still reflects the true model window, but the
 // colour changes at roughly the same absolute token counts as GPT-5.5.
 const CONTEXT_COLOR_REFERENCE_WINDOW = 272_000;
+const CONTEXT_GREEN = "\x1b[38;2;100;200;120m";        // green — great
+const CONTEXT_YELLOW_GREEN = "\x1b[38;2;180;210;100m"; // yellow-green — fine
+const CONTEXT_AMBER = "\x1b[38;2;220;180;60m";         // amber — meh
+const CONTEXT_RED = "\x1b[38;2;240;80;80m";            // red — bad
 
 const STATUS_ICON: Record<Status, string> = {
 	idle:    "●",
@@ -101,6 +105,19 @@ function contextColorPercent(percent: number, tokens: number | null, contextWind
 	return clamp((effectiveTokens / CONTEXT_COLOR_REFERENCE_WINDOW) * 100, 0, 100);
 }
 
+function contextColorForPercent(colorPercent: number): string {
+	if (colorPercent < 25) return CONTEXT_GREEN;
+	if (colorPercent < 40) return CONTEXT_YELLOW_GREEN;
+	if (colorPercent < 60) return CONTEXT_AMBER;
+	return CONTEXT_RED;
+}
+
+function contextWarningTextColor(percent: number | null, tokens: number | null, contextWindow: number): string {
+	if (percent === null) return FG_MUTED;
+	const colorPercent = contextColorPercent(percent, tokens, contextWindow);
+	return colorPercent < 25 ? FG_MUTED : contextColorForPercent(colorPercent);
+}
+
 function contextBar(percent: number | null, barWidth: number, tokens: number | null = null, contextWindow = 0): string {
 	if (percent === null) return `${FG_DIM}${"░".repeat(barWidth)}`;
 
@@ -108,11 +125,7 @@ function contextBar(percent: number | null, barWidth: number, tokens: number | n
 	const colorPercent = contextColorPercent(clampedPercent, tokens, contextWindow);
 	const filled = clamp(Math.round((clampedPercent / 100) * barWidth), 0, barWidth);
 	const empty = barWidth - filled;
-	let barFg: string;
-	if (colorPercent < 25) barFg = "\x1b[38;2;100;200;120m";       // green — great
-	else if (colorPercent < 40) barFg = "\x1b[38;2;180;210;100m";   // yellow-green — fine
-	else if (colorPercent < 60) barFg = "\x1b[38;2;220;180;60m";    // amber — meh
-	else barFg = "\x1b[38;2;240;80;80m";                            // red — bad
+	const barFg = contextColorForPercent(colorPercent);
 	return `${barFg}${"█".repeat(filled)}${FG_DIM}${"░".repeat(empty)}`;
 }
 
@@ -323,7 +336,8 @@ export default function (pi: ExtensionAPI) {
 		const bar = contextBar(contextPercent, 6, contextTokens, contextWindow);
 		const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
 		const tok = contextTokens === null ? `?/${fmtTokens(contextWindow)}` : `${fmtTokens(contextTokens)}/${fmtTokens(contextWindow)}`;
-		ctxParts.push(` ${bar}${FG_RESET} ${FG_WHITE}${pct}${FG_RESET} ${FG_MUTED}${tok}${FG_RESET} `);
+		const tokFg = contextWarningTextColor(contextPercent, contextTokens, contextWindow);
+		ctxParts.push(` ${bar}${FG_RESET} ${FG_WHITE}${pct}${FG_RESET} ${tokFg}${tok}${FG_RESET} `);
 		if (model) {
 			const thinking = pi.getThinkingLevel();
 			const thinkingStr = thinking !== "off" ? ` ${FG_MUTED}• ${thinking}${FG_RESET}` : "";
