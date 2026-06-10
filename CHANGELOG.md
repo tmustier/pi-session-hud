@@ -1,12 +1,6 @@
 # Changelog
 
-## [0.1.7] - 2026-05-07
-
-### Changed
-- Declare the `@earendil-works` Pi peer and development dependencies used by runtime imports.
-- Update Pi extension imports to the new `@earendil-works` namespace.
-
-## Unreleased
+## [0.1.8] - 2026-06-10
 
 - Preserve the HUD background fill on truncated lines in narrow terminals by padding after truncation with the status background reapplied, including after hard ANSI resets emitted by `truncateToWidth()`.
 - Let the status label widen with the terminal instead of always truncating to 10 columns, so stale tool labels such as `subagent 38s` reappear after expanding the terminal.
@@ -14,6 +8,12 @@
 - Apply the same context warning scale to the used-token count while keeping the percentage and `/context-window` suffix muted grey.
 - Add configurable context colour bands via `pi-session-hud.json`, including absolute-token or percentage modes plus provider/model overrides.
 - Reset HUD status from the current `session_start` event instead of the obsolete `session_switch` hook.
+
+## [0.1.7] - 2026-05-07
+
+### Changed
+- Declare the `@earendil-works` Pi peer and development dependencies used by runtime imports.
+- Update Pi extension imports to the new `@earendil-works` namespace.
 
 ## 0.1.6 - 2026-04-23
 
