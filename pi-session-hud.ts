@@ -1,12 +1,14 @@
 /**
- * Pi Session HUD — Persistent session heads-up display below the editor.
+ * Pi Session HUD — a compact context footer plus Amp-style editor chrome.
  *
  * Shows:
- *   - Activity status with color-coded background (idle/running/tool/error/stale)
- *   - Session name or cwd basename
- *   - Git branch + worktree marker (⎇ name current/total when multiple) + diff stats (+added/-removed)
- *   - Context usage bar (% + token count)
- *   - Current model
+ *   ╭──────────────────────────────────────── gpt-5.5 • xhigh ╮
+ *   │ prompt text wraps inside a one-column gutter              │
+ *   ╰───────────────────────────────────────── (openai-codex) ╯
+ *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…
+ *
+ * Minimal footer output: context usage, cwd/branch, git diff stats, and session.
+ * The editor border carries model/thinking at the top and provider at the bottom.
  *
  * Install:
  *   - pi install npm:@tmustier/pi-session-hud
@@ -14,117 +16,40 @@
  * Toggle: /hud (aliases: /status, /header)
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-
-// ── Types ────────────────────────────────────────────────────
-
-type Status = "idle" | "running" | "tool" | "error" | "stale";
-type ContextBandMode = "absolute" | "percent";
-type ContextBandName = "healthy" | "yellow" | "amber" | "red";
-type ContextBandLevelName = "yellow" | "amber" | "red";
-type ContextBandLevels = Record<ContextBandLevelName, number>;
-
-type ContextBandSpec = {
-	mode?: unknown;
-	levels?: unknown;
-	yellow?: unknown;
-	amber?: unknown;
-	red?: unknown;
-};
-
-type ContextBandRootConfig = ContextBandSpec & {
-	default?: unknown;
-	providers?: unknown;
-	models?: unknown;
-};
-
-type ResolvedContextBandConfig = {
-	mode: ContextBandMode;
-	levels: ContextBandLevels;
-	// Built-in absolute defaults preserve the existing behaviour: GPT-5.5-sized
-	// warning token counts on large windows, scaled down on smaller windows.
-	// Explicit absolute levels from config are used as literal token counts.
-	scaleDownToContextWindow: boolean;
-};
+import { CustomEditor, type ExtensionAPI, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { type EditorTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const WIDGET_ID = "pi-session-hud";
 const LEGACY_WIDGET_ID = "pi-status-bar";
-
-// ── Color Palette (raw ANSI truecolor) ───────────────────────
-
-const STATUS_BG: Record<Status, string> = {
-	idle:    "\x1b[48;2;30;80;50m",
-	running: "\x1b[48;2;30;50;90m",
-	tool:    "\x1b[48;2;90;75;20m",
-	error:   "\x1b[48;2;100;30;30m",
-	stale:   "\x1b[48;2;90;60;15m",
-};
-
-const STATUS_FG: Record<Status, string> = {
-	idle:    "\x1b[38;2;100;220;140m",
-	running: "\x1b[38;2;100;160;255m",
-	tool:    "\x1b[38;2;240;200;80m",
-	error:   "\x1b[38;2;255;100;100m",
-	stale:   "\x1b[38;2;255;170;60m",
-};
+const CONTEXT_BAR_WIDTH = 6;
+const SESSION_FALLBACK_WORDS = 8;
+const EDITOR_GUTTER_WIDTH = 1;
+const FOOTER_GUTTER_WIDTH = EDITOR_GUTTER_WIDTH;
 
 const RESET = "\x1b[0m";
-const HARD_RESET_RE = /\x1b\[0m/g;
-
-const BOLD = "\x1b[1m";
-const BOLD_OFF = "\x1b[22m";
-
 const ITALIC_ON = "\x1b[3m";
 const ITALIC_OFF = "\x1b[23m";
-
-// Reset foreground only (keep background)
-const FG_RESET = "\x1b[39m";
-
-const FG_WHITE = "\x1b[38;2;220;220;220m";
-const FG_MUTED = "\x1b[38;2;140;140;140m";
 const FG_DIM = "\x1b[38;2;90;90;90m";
+const FG_MUTED = "\x1b[38;2;128;128;128m";
+const DIFF_GREEN = "\x1b[38;2;100;200;120m";
+const DIFF_RED = "\x1b[38;2;240;100;100m";
+const CONTEXT_GREEN = "\x1b[38;2;100;200;120m";
+const CONTEXT_YELLOW_GREEN = "\x1b[38;2;180;210;100m";
+const CONTEXT_AMBER = "\x1b[38;2;220;180;60m";
+const CONTEXT_RED = "\x1b[38;2;240;80;80m";
 
-// Default colour warnings are anchored to GPT-5.5's context window. For 1M+
-// context models, the fill still reflects the true model window, but the
-// colour changes at roughly the same absolute token counts as GPT-5.5.
 const CONTEXT_COLOR_REFERENCE_WINDOW = 272_000;
-const CONTEXT_DEFAULT_PERCENT_LEVELS: ContextBandLevels = { yellow: 25, amber: 40, red: 60 };
-const CONTEXT_DEFAULT_ABSOLUTE_LEVELS: ContextBandLevels = {
-	yellow: CONTEXT_COLOR_REFERENCE_WINDOW * (CONTEXT_DEFAULT_PERCENT_LEVELS.yellow / 100),
-	amber: CONTEXT_COLOR_REFERENCE_WINDOW * (CONTEXT_DEFAULT_PERCENT_LEVELS.amber / 100),
-	red: CONTEXT_COLOR_REFERENCE_WINDOW * (CONTEXT_DEFAULT_PERCENT_LEVELS.red / 100),
-};
-const DEFAULT_CONTEXT_BAND_CONFIG: ResolvedContextBandConfig = {
-	mode: "absolute",
-	levels: CONTEXT_DEFAULT_ABSOLUTE_LEVELS,
-	scaleDownToContextWindow: true,
-};
-const CONTEXT_CONFIG_FILE_NAME = "pi-session-hud.json";
-const CONTEXT_GREEN = "\x1b[38;2;100;200;120m";        // green — great
-const CONTEXT_YELLOW_GREEN = "\x1b[38;2;180;210;100m"; // yellow-green — fine
-const CONTEXT_AMBER = "\x1b[38;2;220;180;60m";         // amber — meh
-const CONTEXT_RED = "\x1b[38;2;240;80;80m";            // red — bad
-
-const STATUS_ICON: Record<Status, string> = {
-	idle:    "●",
-	running: "◉",
-	tool:    "⚙",
-	error:   "✗",
-	stale:   "⏳",
+const CONTEXT_WARNING_LEVELS = {
+	yellow: CONTEXT_COLOR_REFERENCE_WINDOW * 0.25,
+	amber: CONTEXT_COLOR_REFERENCE_WINDOW * 0.40,
+	red: CONTEXT_COLOR_REFERENCE_WINDOW * 0.60,
 };
 
-const STATUS_LABEL: Record<Status, string> = {
-	idle:    "IDLE",
-	running: "RUN",
-	tool:    "TOOL",
-	error:   "ERR",
-	stale:   "STALE",
+type ContextBand = "healthy" | "yellow" | "amber" | "red";
+type HudTheme = {
+	fg?: (color: string, text: string) => string;
+	italic?: (text: string) => string;
 };
-
-// ── Helpers ──────────────────────────────────────────────────
 
 function fmtTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -136,499 +61,230 @@ function clamp(n: number, min: number, max: number): number {
 	return Math.min(Math.max(n, min), max);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function parseContextBandMode(value: unknown): ContextBandMode | null {
-	return value === "absolute" || value === "percent" ? value : null;
-}
-
-function parseLevelValue(value: unknown): number | null {
-	if (typeof value === "number" && Number.isFinite(value)) return value;
-	if (typeof value !== "string") return null;
-
-	const trimmed = value.trim().toLowerCase();
-	const match = trimmed.match(/^(\d+(?:\.\d+)?)\s*(k|m|%)?$/);
-	if (!match) return null;
-
-	const numeric = Number(match[1]);
-	if (!Number.isFinite(numeric)) return null;
-
-	const suffix = match[2];
-	if (suffix === "k") return numeric * 1_000;
-	if (suffix === "m") return numeric * 1_000_000;
-	return numeric;
-}
-
-function defaultLevelsForMode(mode: ContextBandMode): ContextBandLevels {
-	return mode === "absolute"
-		? { ...CONTEXT_DEFAULT_ABSOLUTE_LEVELS }
-		: { ...CONTEXT_DEFAULT_PERCENT_LEVELS };
-}
-
-function clampLevelsForMode(mode: ContextBandMode, levels: ContextBandLevels): ContextBandLevels {
-	const max = mode === "percent" ? 100 : Number.POSITIVE_INFINITY;
-	const yellow = clamp(levels.yellow, 0, max);
-	const amber = clamp(Math.max(levels.amber, yellow), 0, max);
-	const red = clamp(Math.max(levels.red, amber), 0, max);
-	return { yellow, amber, red };
-}
-
-function getSpecLevels(spec: ContextBandSpec, mode: ContextBandMode): Partial<ContextBandLevels> | null {
-	const levelsSource = isRecord(spec.levels) ? spec.levels : spec;
-	const parsed: Partial<ContextBandLevels> = {};
-	let hasAny = false;
-	for (const key of ["yellow", "amber", "red"] as const) {
-		const value = parseLevelValue(levelsSource[key]);
-		if (value === null) continue;
-		parsed[key] = mode === "percent" ? clamp(value, 0, 100) : Math.max(0, value);
-		hasAny = true;
-	}
-	return hasAny ? parsed : null;
-}
-
-function applyContextBandSpec(
-	base: ResolvedContextBandConfig,
-	spec: ContextBandSpec | undefined,
-): ResolvedContextBandConfig {
-	if (!spec || !isRecord(spec)) return base;
-
-	const parsedMode = parseContextBandMode(spec.mode);
-	const mode = parsedMode ?? base.mode;
-	const modeChanged = mode !== base.mode;
-	const levels = modeChanged ? defaultLevelsForMode(mode) : { ...base.levels };
-	let scaleDownToContextWindow = modeChanged
-		? mode === "absolute"
-		: base.scaleDownToContextWindow;
-
-	const explicitLevels = getSpecLevels(spec, mode);
-	if (explicitLevels) {
-		Object.assign(levels, explicitLevels);
-		// A user-provided absolute level is a literal token count, not a GPT-5.5
-		// reference-window default that should be scaled down on smaller models.
-		if (mode === "absolute") scaleDownToContextWindow = false;
-	}
-
-	return {
-		mode,
-		levels: clampLevelsForMode(mode, levels),
-		scaleDownToContextWindow,
-	};
-}
-
-function getDefaultSpec(config: ContextBandRootConfig): ContextBandSpec | undefined {
-	if (isRecord(config.default)) return config.default as ContextBandSpec;
-	if (config.mode !== undefined || config.levels !== undefined ||
-		config.yellow !== undefined || config.amber !== undefined || config.red !== undefined) {
-		return config;
-	}
-	return undefined;
-}
-
-function lookupOverride(config: ContextBandRootConfig, key: "providers" | "models", names: string[]): ContextBandSpec | undefined {
-	const overrides = config[key];
-	if (!isRecord(overrides)) return undefined;
-	for (const name of names) {
-		const value = overrides[name];
-		if (isRecord(value)) return value as ContextBandSpec;
-	}
-	return undefined;
-}
-
-function resolveContextBandConfig(
-	configs: ContextBandRootConfig[],
-	provider: string,
-	modelId: string,
-): ResolvedContextBandConfig {
-	let resolved = DEFAULT_CONTEXT_BAND_CONFIG;
-	for (const config of configs) {
-		resolved = applyContextBandSpec(resolved, getDefaultSpec(config));
-		resolved = applyContextBandSpec(resolved, lookupOverride(config, "providers", [provider]));
-		resolved = applyContextBandSpec(resolved, lookupOverride(config, "models", [`${provider}/${modelId}`, modelId]));
-	}
-	return resolved;
-}
-
-function effectiveContextBandLevels(config: ResolvedContextBandConfig, contextWindow: number): ContextBandLevels {
-	if (config.mode !== "absolute" || !config.scaleDownToContextWindow ||
-		contextWindow <= 0 || contextWindow >= CONTEXT_COLOR_REFERENCE_WINDOW) {
-		return config.levels;
+function effectiveWarningLevels(contextWindow: number) {
+	if (contextWindow <= 0 || contextWindow >= CONTEXT_COLOR_REFERENCE_WINDOW) {
+		return CONTEXT_WARNING_LEVELS;
 	}
 
 	const scale = contextWindow / CONTEXT_COLOR_REFERENCE_WINDOW;
 	return {
-		yellow: config.levels.yellow * scale,
-		amber: config.levels.amber * scale,
-		red: config.levels.red * scale,
+		yellow: CONTEXT_WARNING_LEVELS.yellow * scale,
+		amber: CONTEXT_WARNING_LEVELS.amber * scale,
+		red: CONTEXT_WARNING_LEVELS.red * scale,
 	};
 }
 
-function contextMetricValue(
-	percent: number | null,
-	tokens: number | null,
-	contextWindow: number,
-	config: ResolvedContextBandConfig,
-): number | null {
-	if (percent === null) return null;
-	if (config.mode === "percent") return clamp(percent, 0, 100);
-	if (tokens !== null) return Math.max(0, tokens);
-	return contextWindow > 0 ? (clamp(percent, 0, 100) / 100) * contextWindow : null;
-}
+function contextBand(percent: number | null, tokens: number | null, contextWindow: number): ContextBand {
+	if (percent === null) return "healthy";
 
-function contextBand(
-	percent: number | null,
-	tokens: number | null,
-	contextWindow: number,
-	config: ResolvedContextBandConfig,
-): ContextBandName {
-	const value = contextMetricValue(percent, tokens, contextWindow, config);
-	if (value === null) return "healthy";
+	const value = tokens !== null
+		? Math.max(0, tokens)
+		: contextWindow > 0
+			? (clamp(percent, 0, 100) / 100) * contextWindow
+			: clamp(percent, 0, 100);
+	const levels = tokens !== null || contextWindow > 0
+		? effectiveWarningLevels(contextWindow)
+		: { yellow: 25, amber: 40, red: 60 };
 
-	const levels = effectiveContextBandLevels(config, contextWindow);
 	if (value >= levels.red) return "red";
 	if (value >= levels.amber) return "amber";
 	if (value >= levels.yellow) return "yellow";
 	return "healthy";
 }
 
-function contextColorForBand(band: ContextBandName): string {
+function contextColor(band: ContextBand): string {
 	if (band === "yellow") return CONTEXT_YELLOW_GREEN;
 	if (band === "amber") return CONTEXT_AMBER;
 	if (band === "red") return CONTEXT_RED;
 	return CONTEXT_GREEN;
 }
 
-function contextWarningTextColor(band: ContextBandName): string {
-	return band === "healthy" ? FG_MUTED : contextColorForBand(band);
-}
-
-function contextBar(percent: number | null, barWidth: number, band: ContextBandName): string {
-	if (percent === null) return `${FG_DIM}${"░".repeat(barWidth)}`;
+function contextBar(percent: number | null, band: ContextBand): string {
+	if (percent === null) return `${FG_DIM}${"░".repeat(CONTEXT_BAR_WIDTH)}${RESET}`;
 
 	const clampedPercent = clamp(percent, 0, 100);
-	const filled = clamp(Math.round((clampedPercent / 100) * barWidth), 0, barWidth);
-	const empty = barWidth - filled;
-	return `${contextColorForBand(band)}${"█".repeat(filled)}${FG_DIM}${"░".repeat(empty)}`;
+	const filled = clamp(Math.round((clampedPercent / 100) * CONTEXT_BAR_WIDTH), 0, CONTEXT_BAR_WIDTH);
+	const empty = CONTEXT_BAR_WIDTH - filled;
+	return `${contextColor(band)}${"█".repeat(filled)}${FG_DIM}${"░".repeat(empty)}${RESET}`;
 }
 
-function expandHome(filePath: string): string {
-	if (!filePath.startsWith("~")) return filePath;
-	const home = process.env.HOME;
-	if (!home) return filePath;
-	if (filePath === "~") return home;
-	if (filePath.startsWith("~/")) return join(home, filePath.slice(2));
-	return filePath;
-}
-
-function readContextBandConfigFile(filePath: string): ContextBandRootConfig | null {
-	try {
-		if (!existsSync(filePath)) return null;
-		const parsed = JSON.parse(readFileSync(filePath, "utf8"));
-		const candidate = isRecord(parsed.contextBands) ? parsed.contextBands : parsed;
-		return isRecord(candidate) ? candidate as ContextBandRootConfig : null;
-	} catch {
-		return null;
+function displayPath(cwd: string): string {
+	const home = process.env.HOME || "";
+	if (home && cwd.startsWith(home)) {
+		const rel = cwd.slice(home.length);
+		return rel ? `~${rel}` : "~";
 	}
+	return cwd;
 }
 
-function loadContextBandConfigs(ctx: ExtensionContext): ContextBandRootConfig[] {
-	const paths: string[] = [];
-	const home = process.env.HOME;
-	if (home) paths.push(join(home, ".pi", "agent", CONTEXT_CONFIG_FILE_NAME));
-
-	const isProjectTrusted = typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
-	if (isProjectTrusted) paths.push(join(ctx.cwd, ".pi", CONTEXT_CONFIG_FILE_NAME));
-
-	const envConfigPath = process.env.PI_SESSION_HUD_CONFIG;
-	if (envConfigPath) paths.push(resolve(expandHome(envConfigPath)));
-
-	return paths
-		.map(readContextBandConfigFile)
-		.filter((config): config is ContextBandRootConfig => config !== null);
+function normalizeText(text: string): string {
+	return text.replace(/[\r\n\t]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-async function getGitStats(pi: ExtensionAPI): Promise<{ added: number; removed: number; dirty: boolean }> {
+function firstWords(text: string, maxWords = SESSION_FALLBACK_WORDS): string {
+	const words = normalizeText(text).split(" ").filter(Boolean);
+	if (words.length <= maxWords) return words.join(" ");
+	return `${words.slice(0, maxWords).join(" ")}…`;
+}
+
+function textFromMessageContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part) => part?.type === "text" && typeof part.text === "string" ? part.text : "")
+		.join(" ");
+}
+
+function extractFirstUserText(ctx: ExtensionContext): string | null {
 	try {
-		const result = await pi.exec("git", ["diff", "--stat", "HEAD"], { timeout: 2000 });
-		if (result.code !== 0) return { added: 0, removed: 0, dirty: false };
-		let added = 0, removed = 0;
-		for (const line of result.stdout.split("\n")) {
-			const m1 = line.match(/(\d+) insertions?\(\+\)/);
-			const m2 = line.match(/(\d+) deletions?\(-\)/);
-			if (m1) added = parseInt(m1[1]!, 10);
-			if (m2) removed = parseInt(m2[1]!, 10);
+		const sessionManager = ctx.sessionManager as any;
+		const entries: any[] = sessionManager.getBranch?.() ?? sessionManager.getEntries?.() ?? [];
+		for (const entry of entries) {
+			if (entry?.type !== "message" || entry.message?.role !== "user") continue;
+			const text = normalizeText(textFromMessageContent(entry.message.content));
+			if (text) return text;
 		}
-		const status = await pi.exec("git", ["status", "--porcelain"], { timeout: 2000 });
-		const dirty = status.code === 0 && status.stdout.trim().length > 0;
-		return { added, removed, dirty };
 	} catch {
-		return { added: 0, removed: 0, dirty: false };
+		// Best-effort fallback only.
 	}
+	return null;
 }
 
-function pathBasename(pathValue: string): string {
-	const trimmed = pathValue.endsWith("/") ? pathValue.slice(0, -1) : pathValue;
-	const parts = trimmed.split("/").filter(Boolean);
-	const lastPart = parts.length > 0 ? parts[parts.length - 1] : "";
-	return lastPart || trimmed || "";
+function fitLine(line: string, width: number): string {
+	if (width <= 0) return "";
+	const truncated = truncateToWidth(line, width, "…", false);
+	return `${truncated}${RESET}${" ".repeat(Math.max(0, width - visibleWidth(truncated)))}`;
 }
 
-async function getWorktreeInfo(pi: ExtensionAPI): Promise<{ count: number; name: string | null; index: number | null }> {
-	try {
-		const listResult = await pi.exec("git", ["worktree", "list", "--porcelain"], { timeout: 2000 });
-		if (listResult.code !== 0) return { count: 0, name: null, index: null };
+function fitLeftRight(left: string, right: string, width: number): string {
+	if (!right) return fitLine(left, width);
+	if (width <= 0) return "";
 
-		const worktreePaths: string[] = [];
-		for (const line of listResult.stdout.split("\n")) {
-			if (!line.startsWith("worktree ")) continue;
-			const worktreePath = line.slice("worktree ".length).trim();
-			if (worktreePath) worktreePaths.push(worktreePath);
-		}
+	const rightWidth = visibleWidth(right);
+	if (rightWidth + 1 >= width) return fitLine(`${left} ${right}`, width);
 
-		const count = worktreePaths.length;
-		if (count <= 1) return { count, name: null, index: null };
+	const leftWidth = width - rightWidth - 1;
+	const leftFit = truncateToWidth(left, leftWidth, "…", false);
+	const padding = " ".repeat(Math.max(1, width - visibleWidth(leftFit) - rightWidth));
+	return `${leftFit}${padding}${right}${RESET}`;
+}
 
-		const topLevelResult = await pi.exec("git", ["rev-parse", "--show-toplevel"], { timeout: 2000 });
-		if (topLevelResult.code !== 0) return { count, name: null, index: null };
-		const currentPath = topLevelResult.stdout.trim();
+function padAnsiLine(line: string, width: number): string {
+	if (width <= 0) return "";
+	const fitted = visibleWidth(line) > width ? truncateToWidth(line, width, "…", false) : line;
+	return `${fitted}${RESET}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
+}
 
-		let zeroBasedIndex = worktreePaths.findIndex((worktreePath) => worktreePath === currentPath);
-		if (zeroBasedIndex < 0) {
-			const currentBase = pathBasename(currentPath);
-			const matchingByBase: number[] = [];
-			for (let i = 0; i < worktreePaths.length; i++) {
-				if (pathBasename(worktreePaths[i]) === currentBase) matchingByBase.push(i);
-			}
-			if (matchingByBase.length === 1) zeroBasedIndex = matchingByBase[0];
-		}
+function fitHorizontalBorder(
+	left: string,
+	right: string,
+	width: number,
+	border: (text: string) => string,
+	leftCorner: string,
+	rightCorner: string,
+	fill: (text: string) => string = border,
+): string {
+	if (width <= 0) return "";
+	if (width === 1) return border(leftCorner);
 
-		const gitDirResult = await pi.exec("git", ["rev-parse", "--git-dir"], { timeout: 2000 });
-		const gitDir = gitDirResult.code === 0 ? gitDirResult.stdout.trim() : "";
-		const isMainWorktree = gitDir === ".git" || gitDir.endsWith("/.git");
-		const name = isMainWorktree ? "main" : pathBasename(currentPath) || "linked";
-		const index = zeroBasedIndex >= 0 ? zeroBasedIndex + 1 : null;
+	let leftText = left;
+	let rightText = right;
+	const fixedWidth = 2;
+	const minimumGap = leftText && rightText ? 3 : 0;
 
-		return { count, name, index };
-	} catch {
-		return { count: 0, name: null, index: null };
+	while (
+		fixedWidth + visibleWidth(leftText) + visibleWidth(rightText) + minimumGap > width &&
+		visibleWidth(rightText) > 0
+	) {
+		rightText = truncateToWidth(rightText, Math.max(0, visibleWidth(rightText) - 1), "");
 	}
+	while (
+		fixedWidth + visibleWidth(leftText) + visibleWidth(rightText) + minimumGap > width &&
+		visibleWidth(leftText) > 0
+	) {
+		leftText = truncateToWidth(leftText, Math.max(0, visibleWidth(leftText) - 1), "");
+	}
+
+	const gapWidth = Math.max(0, width - fixedWidth - visibleWidth(leftText) - visibleWidth(rightText));
+	return `${border(leftCorner)}${leftText}${fill("─".repeat(gapWidth))}${rightText}${border(rightCorner)}${RESET}`;
 }
 
-// ── Extension ────────────────────────────────────────────────
+function stripAnsi(text: string): string {
+	return text
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+		.replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "");
+}
+
+function isEditorBorderLine(line: string): boolean {
+	const plain = stripAnsi(line);
+	return plain.includes("─") && /^[─ ↑↓0-9more]+$/.test(plain);
+}
+
+function findBottomBorderIndex(lines: string[]): number {
+	for (let i = lines.length - 1; i > 0; i--) {
+		if (isEditorBorderLine(lines[i] ?? "")) return i;
+	}
+	return lines.length - 1;
+}
+
+function scrollIndicator(line: string): string {
+	return stripAnsi(line).match(/[↑↓] \d+ more/)?.[0] ?? "";
+}
+
+function parseGitShortstat(stdout: string): { added: number; removed: number } {
+	const added = Number(stdout.match(/(\d+) insertions?\(\+\)/)?.[1] ?? 0);
+	const removed = Number(stdout.match(/(\d+) deletions?\(-\)/)?.[1] ?? 0);
+	return { added, removed };
+}
+
+function formatDiffStats(added: number, removed: number, dirty: boolean): string {
+	const parts: string[] = [];
+	if (added > 0) parts.push(`${DIFF_GREEN}+${added}${RESET}`);
+	if (removed > 0) parts.push(`${DIFF_RED}-${removed}${RESET}`);
+	if (parts.length > 0) return ` ${parts.join(" ")}`;
+	return dirty ? ` ${FG_DIM}~${RESET}` : "";
+}
+
+function muted(text: string, theme?: HudTheme): string {
+	return theme?.fg ? theme.fg("muted", text) : `${FG_MUTED}${text}${RESET}`;
+}
+
+function italic(text: string, theme?: HudTheme): string {
+	return theme?.italic ? theme.italic(text) : `${ITALIC_ON}${text}${ITALIC_OFF}`;
+}
+
+function styleSessionLabel(label: string, isFallback: boolean, theme?: HudTheme): string {
+	return isFallback ? italic(label, theme) : label;
+}
 
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
-
-	let status: Status = "idle";
-	let toolName: string | undefined;
-	let toolStartTime: number | undefined;
-	let gitBranch: string | null = null;
-	let gitAdded = 0;
-	let gitRemoved = 0;
-	let gitDirty = false;
-	let worktreeCount = 0;
-	let worktreeName: string | null = null;
-	let worktreeIndex: number | null = null;
 	let contextPercent: number | null = null;
 	let contextTokens: number | null = null;
 	let contextWindow = 0;
-	let model = "";
-	let modelProvider = "";
-	let contextBandConfigs: ContextBandRootConfig[] = [];
-
-	let currentCtx: ExtensionContext | null = null;
+	let gitAdded = 0;
+	let gitRemoved = 0;
+	let gitDirty = false;
 	let gitPollTimer: ReturnType<typeof setInterval> | null = null;
-	let staleTimer: ReturnType<typeof setTimeout> | null = null;
-	let staleInterval: ReturnType<typeof setInterval> | null = null;
-	let widgetTui: any = null;
-	let widgetTheme: any = null;
+	let editorInstallTimer: ReturnType<typeof setTimeout> | null = null;
+	let currentCtx: ExtensionContext | null = null;
 	let firstUserText: string | null = null;
-	// Flag flipped in the widget's dispose() — used to short-circuit renders and
-	// polling callbacks that would otherwise call into a stale ExtensionAPI.
+	let footerTui: TUI | null = null;
+	let editorTui: TUI | null = null;
 	let disposed = false;
 
-	/**
-	 * During /resume, pi core invalidates the old extension's ExtensionAPI
-	 * BEFORE the old widget is disposed or replaced. Any call to pi.* in that
-	 * window throws "This extension instance is stale...". Use this helper to
-	 * swallow that specific error so our render loop and pollers stay quiet
-	 * until the new session's install() takes over the widget.
-	 */
 	function isStaleExtensionError(err: unknown): boolean {
 		const message = err instanceof Error ? err.message : String(err ?? "");
 		return message.includes("stale after session replacement");
 	}
 
-	// ── Render ───────────────────────────────────────────────
+	function refreshContext(ctx: ExtensionContext | null = currentCtx) {
+		if (!ctx) return;
 
-	function renderBar(width: number): string[] {
-		// Widget was disposed (session teardown in progress) — emit nothing.
-		if (disposed) return [""];
-		try {
-			return renderBarUnsafe(width);
-		} catch (err) {
-			if (isStaleExtensionError(err)) {
-				// Session is mid-replacement; a fresh widget will replace us shortly.
-				return [""];
-			}
-			throw err;
-		}
-	}
+		if (!firstUserText) firstUserText = extractFirstUserText(ctx);
 
-	function renderBarUnsafe(width: number): string[] {
-		const bg = STATUS_BG[status];
-		const sFg = STATUS_FG[status];
-		const icon = STATUS_ICON[status];
-		let label = STATUS_LABEL[status];
-
-		if (status === "tool" && toolName) {
-			label = toolName;
-		}
-		if (status === "stale" && toolName) {
-			const elapsed = toolStartTime ? Math.floor((Date.now() - toolStartTime) / 1000) : 0;
-			label = `${toolName} ${elapsed}s`;
-		}
-
-		const sep = `${FG_DIM}│${FG_RESET}`;
-
-		const padBgLine = (prefixed: string): string => {
-			if (width <= 0) return "";
-
-			// truncateToWidth() injects a hard reset (\x1b[0m) around its
-			// ellipsis. If we ask it to pad too, any padding after that reset is
-			// rendered without our HUD background, which is visible on narrow
-			// terminals (especially when a wide grapheme is clipped at the edge).
-			// Truncate first, then re-apply the background after every hard reset
-			// and do our own background-coloured right padding.
-			const ellipsis = `${bg}…${FG_RESET}`;
-			const truncated = truncateToWidth(prefixed, width, ellipsis, false);
-			const bgRestored = truncated.replace(HARD_RESET_RE, `${RESET}${bg}`);
-			const padding = " ".repeat(Math.max(0, width - visibleWidth(bgRestored)));
-			return `${bgRestored}${bg}${padding}${RESET}`;
-		};
-
-		// ── Main line: directory (branch) ⎇ worktree-position: name/message ──
-		const home = process.env.HOME || "";
-		const cwd = process.cwd();
-		let displayDir: string;
-		if (home && cwd.startsWith(home)) {
-			const rel = cwd.slice(home.length);
-			displayDir = rel ? `~${rel}` : "~";
-		} else {
-			displayDir = cwd;
-		}
-
-		const sessionName = pi.getSessionName();
-		const hasName = Boolean(sessionName && sessionName.trim());
-		const mainTextRaw = hasName
-			? sessionName!.trim()
-			: (firstUserText && firstUserText.trim())
-				? firstUserText.trim()
-				: "";
-
-		const mainTextStyled = hasName && widgetTheme
-			? widgetTheme.fg("warning", mainTextRaw)
-			: widgetTheme
-				? widgetTheme.italic(widgetTheme.fg("dim", mainTextRaw))
-				: `${FG_DIM}${ITALIC_ON}${mainTextRaw}${ITALIC_OFF}${FG_RESET}`;
-
-		const branchStyled = gitBranch
-			? ` ${FG_MUTED}(${FG_WHITE}${gitBranch}${FG_MUTED})${FG_RESET}`
-			: "";
-
-		// Medium format: current/total when index is known, fallback to "N wt"
-		const worktreePosition = worktreeIndex !== null ? `${worktreeIndex}/${worktreeCount}` : `${worktreeCount} wt`;
-		const worktreeStyled = (worktreeCount > 1 && worktreeName)
-			? ` ${FG_DIM}⎇${FG_RESET} ${FG_MUTED}${worktreeName}${FG_RESET} ${FG_DIM}${worktreePosition}${FG_RESET}`
-			: "";
-
-		const mainInner =
-			` ${FG_WHITE}${displayDir}${FG_RESET}` +
-			branchStyled +
-			worktreeStyled +
-			`${FG_DIM}: ${FG_RESET}` +
-			`${mainTextStyled}${FG_RESET} `;
-
-		const lineMain = padBgLine(`${bg}${mainInner}`);
-
-		// ── Context line: context % ... │ model + thinking ──
-		const ctxParts: string[] = [];
-		const contextBands = resolveContextBandConfig(contextBandConfigs, modelProvider, model);
-		const band = contextBand(contextPercent, contextTokens, contextWindow, contextBands);
-		const bar = contextBar(contextPercent, 6, band);
-		const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
-		const tokUsed = contextTokens === null ? "?" : fmtTokens(contextTokens);
-		const tokWindow = fmtTokens(contextWindow);
-		const pctFg = contextBands.mode === "percent" ? contextWarningTextColor(band) : FG_MUTED;
-		const tokFg = contextBands.mode === "absolute" ? contextWarningTextColor(band) : FG_MUTED;
-		ctxParts.push(` ${bar}${FG_RESET} ${pctFg}${pct}${FG_RESET} ${tokFg}${tokUsed}${FG_RESET}${FG_MUTED}/${tokWindow}${FG_RESET} `);
-		if (model) {
-			const thinking = pi.getThinkingLevel();
-			const thinkingStr = thinking !== "off" ? ` ${FG_MUTED}• ${thinking}${FG_RESET}` : "";
-			ctxParts.push(` ${FG_MUTED}${model}${FG_RESET}${thinkingStr} `);
-		}
-		const lineContext = padBgLine(`${bg}${ctxParts.join(sep)}`);
-
-		// ── Status line: STATUS (+/-) ──
-		// Git diff stats next to status
-		const diffParts: string[] = [];
-		if (gitAdded > 0) diffParts.push(`\x1b[38;2;100;200;120m+${gitAdded}${FG_RESET}`);
-		if (gitRemoved > 0) diffParts.push(`\x1b[38;2;240;100;100m-${gitRemoved}${FG_RESET}`);
-		if (gitDirty && gitAdded === 0 && gitRemoved === 0) diffParts.push(`${FG_MUTED}~${FG_RESET}`);
-
-		const STATUS_LABEL_MIN_WIDTH = 10;
-		const diffSuffix = diffParts.length ? `  ${diffParts.join(" ")}` : "";
-		const reservedStatusWidth = 1 + visibleWidth(icon) + 1 + visibleWidth(diffSuffix) + 1;
-		const maxLabelWidth = Math.max(1, width - reservedStatusWidth);
-		const desiredLabelWidth = Math.max(STATUS_LABEL_MIN_WIDTH, visibleWidth(label));
-		const labelWidth = clamp(desiredLabelWidth, 1, maxLabelWidth);
-		const labelTrunc = truncateToWidth(label, labelWidth, "…");
-		const labelPad = labelTrunc + " ".repeat(Math.max(0, labelWidth - visibleWidth(labelTrunc)));
-		const statusInner = ` ${sFg}${BOLD}${icon} ${labelPad}${BOLD_OFF}${FG_RESET}${diffSuffix} `;
-		const lineStatus = padBgLine(`${bg}${statusInner}`);
-
-		// Padding lines: just spaces, exactly width chars
-		const emptyLine = width > 0 ? `${bg}${" ".repeat(width)}${RESET}` : "";
-
-		return [emptyLine, lineMain, lineContext, lineStatus, emptyLine, ""];
-	}
-
-	// ── Data refresh ─────────────────────────────────────────
-
-	async function refreshGit() {
-		if (disposed) return;
-		try {
-			const stats = await getGitStats(pi);
-			if (disposed) return;
-			gitAdded = stats.added;
-			gitRemoved = stats.removed;
-			gitDirty = stats.dirty;
-			widgetTui?.requestRender();
-		} catch (err) {
-			if (isStaleExtensionError(err)) return;
-			throw err;
-		}
-	}
-
-	async function refreshWorktree() {
-		if (disposed) return;
-		try {
-			const info = await getWorktreeInfo(pi);
-			if (disposed) return;
-			worktreeCount = info.count;
-			worktreeName = info.name;
-			worktreeIndex = info.index;
-			widgetTui?.requestRender();
-		} catch (err) {
-			if (isStaleExtensionError(err)) return;
-			throw err;
-		}
-	}
-
-	function refreshContext() {
-		if (!currentCtx) return;
-		const usage = currentCtx.getContextUsage();
+		const usage = ctx.getContextUsage();
 		if (usage) {
 			contextPercent = usage.percent;
 			contextTokens = usage.tokens;
@@ -636,172 +292,242 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			contextPercent = null;
 			contextTokens = null;
-			contextWindow = currentCtx.model?.contextWindow ?? 0;
+			contextWindow = ctx.model?.contextWindow ?? 0;
 		}
-		model = currentCtx.model?.id ?? "";
-		modelProvider = currentCtx.model?.provider ?? "";
 	}
 
-	function clearStaleTimer() {
-		if (staleTimer) { clearTimeout(staleTimer); staleTimer = null; }
-		if (staleInterval) { clearInterval(staleInterval); staleInterval = null; }
+	function clearGitPoll() {
+		if (!gitPollTimer) return;
+		clearInterval(gitPollTimer);
+		gitPollTimer = null;
 	}
 
-	function startStaleTimer() {
-		clearStaleTimer();
-		staleTimer = setTimeout(() => {
-			if (status === "tool") {
-				status = "stale";
-				widgetTui?.requestRender();
-				staleInterval = setInterval(() => {
-					if (status !== "stale") { clearInterval(staleInterval!); staleInterval = null; return; }
-					widgetTui?.requestRender();
-				}, 1000);
-			}
-		}, 30_000);
+	function clearEditorInstallTimer() {
+		if (!editorInstallTimer) return;
+		clearTimeout(editorInstallTimer);
+		editorInstallTimer = null;
 	}
 
-	// ── Install widget ───────────────────────────────────────
+	async function refreshGit(ctx: ExtensionContext | null = currentCtx) {
+		if (!ctx || disposed) return;
 
-	function extractFirstUserText(ctx: ExtensionContext): string | null {
 		try {
-			const entries: any[] = ctx.sessionManager.getEntries?.() ?? [];
-			for (const e of entries) {
-				if (e?.type !== "message") continue;
-				const m = e.message;
-				if (!m || m.role !== "user") continue;
-				const parts: any[] = m.content ?? [];
-				let text = "";
-				for (const p of parts) {
-					if (p?.type === "text" && typeof p.text === "string") text += p.text;
-				}
-				text = text.replace(/[\r\n\t]/g, " ").replace(/\s+/g, " ").trim();
-				if (text) return text;
+			const cwd = ctx.cwd;
+			const [diffResult, statusResult] = await Promise.all([
+				pi.exec("git", ["diff", "--shortstat", "HEAD"], { cwd, timeout: 2000 }).catch(() => undefined),
+				pi.exec("git", ["status", "--porcelain"], { cwd, timeout: 2000 }).catch(() => undefined),
+			]);
+
+			if (disposed || ctx !== currentCtx) return;
+			if (diffResult?.code !== 0 || statusResult?.code !== 0) {
+				gitAdded = 0;
+				gitRemoved = 0;
+				gitDirty = false;
+				footerTui?.requestRender();
+				return;
 			}
-			return null;
-		} catch {
-			return null;
+
+			const parsed = parseGitShortstat(diffResult?.stdout ?? "");
+			gitAdded = parsed.added;
+			gitRemoved = parsed.removed;
+			gitDirty = Boolean(statusResult?.stdout.trim());
+			footerTui?.requestRender();
+		} catch (err) {
+			if (isStaleExtensionError(err)) return;
+			throw err;
+		}
+	}
+
+	function startGitPoll(ctx: ExtensionContext) {
+		clearGitPoll();
+		void refreshGit(ctx);
+		gitPollTimer = setInterval(() => { void refreshGit(); }, 10_000);
+	}
+
+	function currentModelLabel(): string {
+		const model = currentCtx?.model;
+		if (!model) return "";
+		const thinking = pi.getThinkingLevel();
+		return thinking !== "off" ? `${model.id} • ${thinking}` : model.id;
+	}
+
+	function currentProviderLabel(): string {
+		const provider = currentCtx?.model?.provider;
+		return provider ? `(${provider})` : "";
+	}
+
+	function requestChromeRender() {
+		footerTui?.requestRender();
+		editorTui?.requestRender();
+	}
+
+	function renderFooter(
+		width: number,
+		footerData?: { getGitBranch?: () => string | null | undefined },
+		theme?: HudTheme,
+	): string[] {
+		if (disposed) return [""];
+		try {
+			refreshContext();
+
+			const band = contextBand(contextPercent, contextTokens, contextWindow);
+			const color = contextColor(band);
+			const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
+			const tokUsed = contextTokens === null ? "?" : fmtTokens(contextTokens);
+			const tokWindow = fmtTokens(contextWindow);
+			const contextPart = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}/${tokWindow}${RESET}`;
+
+			const cwd = currentCtx?.cwd ?? process.cwd();
+			const branch = footerData?.getGitBranch?.();
+			const diffStats = formatDiffStats(gitAdded, gitRemoved, gitDirty);
+			const location = `${displayPath(cwd)}${branch ? ` (${branch})` : ""}${diffStats}`;
+			const sessionName = normalizeText(pi.getSessionName() ?? "");
+			const isFallbackSessionLabel = !sessionName && Boolean(firstUserText);
+			const sessionLabelRaw = sessionName || (firstUserText ? firstWords(firstUserText) : "");
+			const sessionLabel = sessionLabelRaw ? styleSessionLabel(sessionLabelRaw, isFallbackSessionLabel, theme) : "";
+			const divider = muted("│", theme);
+			const sessionDivider = muted("|", theme);
+			const footerContent = sessionLabel
+				? `${contextPart} ${divider} ${location} ${sessionDivider} ${sessionLabel}`
+				: `${contextPart} ${divider} ${location}`;
+			const left = `${" ".repeat(FOOTER_GUTTER_WIDTH)}${footerContent}`;
+
+			return [fitLine(left, width)];
+		} catch (err) {
+			if (isStaleExtensionError(err)) return [""];
+			throw err;
 		}
 	}
 
 	function install(ctx: ExtensionContext) {
 		if (!ctx.hasUI || !enabled) return;
 		currentCtx = ctx;
-		model = ctx.model?.id ?? "";
-		modelProvider = ctx.model?.provider ?? "";
-		contextBandConfigs = loadContextBandConfigs(ctx);
-		firstUserText = extractFirstUserText(ctx);
-		worktreeCount = 0;
-		worktreeName = null;
-		worktreeIndex = null;
+		firstUserText = null;
+		refreshContext(ctx);
 
-		// Remove legacy widget from older versions
+		// Clear old widget-based HUDs, then replace Pi's multi-line footer with
+		// this single compact footer line. That removes the duplicated cwd/model,
+		// compaction, and MCP status rows from the area below the input box.
+		ctx.ui.setWidget(WIDGET_ID, undefined);
 		ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
-
-		// We're installing a fresh widget — clear the disposed flag so the new
-		// render callback (closed over the same module scope) is live again.
 		disposed = false;
-
-		ctx.ui.setWidget(WIDGET_ID, (tui, theme) => {
-			widgetTui = tui;
-			widgetTheme = theme;
+		startGitPoll(ctx);
+		ctx.ui.setFooter((tui, theme, footerData) => {
+			footerTui = tui;
+			const unsubscribeBranch = footerData?.onBranchChange?.(() => tui.requestRender());
 			return {
-				render: (width: number) => renderBar(width),
+				render: (width: number) => renderFooter(width, footerData, theme),
 				invalidate() {},
 				dispose() {
 					disposed = true;
-					if (gitPollTimer) { clearInterval(gitPollTimer); gitPollTimer = null; }
-					clearStaleTimer();
-					widgetTui = null;
-					widgetTheme = null;
+					footerTui = null;
+					clearGitPoll();
+					clearEditorInstallTimer();
+					if (typeof unsubscribeBranch === "function") unsubscribeBranch();
 				},
 			};
-		}, { placement: "belowEditor" });
-
-		refreshContext();
-		refreshGit();
-
-		// Poll git diff stats every 10s (branch/worktree refreshed on install + agent_end)
-		if (gitPollTimer) clearInterval(gitPollTimer);
-		gitPollTimer = setInterval(() => refreshGit(), 10_000);
-
-		// Get initial git branch + worktree info
-		pi.exec("git", ["branch", "--show-current"], { timeout: 2000 }).then((r) => {
-			if (disposed) return;
-			if (r.code === 0) {
-				gitBranch = r.stdout.trim() || "detached";
-				widgetTui?.requestRender();
-			}
-		}).catch((err) => {
-			if (isStaleExtensionError(err)) return;
-			// Any other error: git not installed, not a repo, timeout — ignore quietly.
 		});
-		refreshWorktree();
+
+		class HudEditor extends CustomEditor {
+			constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
+				super(tui, theme, keybindings, { paddingX: EDITOR_GUTTER_WIDTH });
+				editorTui = tui;
+			}
+
+			setPaddingX(padding: number): void {
+				super.setPaddingX(Math.max(EDITOR_GUTTER_WIDTH, padding));
+			}
+
+			render(width: number): string[] {
+				if (width < 4) return super.render(width);
+
+				try {
+					const innerWidth = Math.max(1, width - 2);
+					const lines = super.render(innerWidth);
+					if (lines.length < 2) return lines.map((line) => fitLine(line, width));
+
+					const theme = ctx.ui.theme;
+					const border = (text: string) => this.borderColor(text);
+					const bottomIndex = findBottomBorderIndex(lines);
+					const topIndicator = scrollIndicator(lines[0] ?? "");
+					const bottomIndicator = scrollIndicator(lines[bottomIndex] ?? "");
+					const modelLabel = currentModelLabel();
+					const providerLabel = currentProviderLabel();
+					const topLeft = topIndicator ? theme.fg("dim", ` ${topIndicator} `) : "";
+					const bottomLeft = bottomIndicator ? theme.fg("dim", ` ${bottomIndicator} `) : "";
+					const topRight = modelLabel ? theme.fg("accent", ` ${modelLabel} `) : "";
+					const bottomRight = providerLabel ? theme.fg("muted", ` ${providerLabel} `) : "";
+					const rendered: string[] = [
+						fitHorizontalBorder(topLeft, topRight, width, border, "╭", "╮"),
+					];
+
+					for (let i = 1; i < lines.length; i++) {
+						const line = lines[i] ?? "";
+						if (i === bottomIndex) {
+							rendered.push(fitHorizontalBorder(bottomLeft, bottomRight, width, border, "╰", "╯"));
+						} else if (i > bottomIndex) {
+							rendered.push(fitLine(line, width));
+						} else {
+							rendered.push(`${border("│")}${padAnsiLine(line, innerWidth)}${border("│")}`);
+						}
+					}
+
+					return rendered;
+				} catch (err) {
+					if (isStaleExtensionError(err)) return super.render(width);
+					throw err;
+				}
+			}
+		}
+
+		const setHudEditor = () => {
+			if (disposed || currentCtx !== ctx) return;
+			ctx.ui.setEditorComponent((tui, theme, keybindings) => new HudEditor(tui, theme, keybindings));
+		};
+
+		setHudEditor();
+		clearEditorInstallTimer();
+		// Some editor extensions also install during session_start. Defer one
+		// extra tick so this package's chrome remains the final editor wrapper.
+		editorInstallTimer = setTimeout(() => {
+			editorInstallTimer = null;
+			try {
+				setHudEditor();
+			} catch (err) {
+				if (!isStaleExtensionError(err)) throw err;
+			}
+		}, 0);
 	}
 
-	// ── Events ───────────────────────────────────────────────
-
-	pi.on("session_start", async (_event, ctx) => { status = "idle"; install(ctx); });
-
-	pi.on("agent_start", async (_event, ctx) => {
+	function refreshAndRender(ctx: ExtensionContext) {
 		currentCtx = ctx;
-		status = "running";
-		toolName = undefined;
-		clearStaleTimer();
-		widgetTui?.requestRender();
-	});
+		refreshContext(ctx);
+		requestChromeRender();
+	}
 
+	pi.on("session_start", async (_event, ctx) => { install(ctx); });
+	pi.on("session_shutdown", async () => {
+		disposed = true;
+		clearGitPoll();
+		clearEditorInstallTimer();
+		footerTui = null;
+		editorTui = null;
+	});
+	pi.on("agent_start", async (_event, ctx) => { refreshAndRender(ctx); });
 	pi.on("agent_end", async (_event, ctx) => {
-		currentCtx = ctx;
-		status = "idle";
-		toolName = undefined;
-		clearStaleTimer();
-		refreshContext();
-		refreshGit();
-		// Re-poll branch + worktree in case they changed
-		pi.exec("git", ["branch", "--show-current"], { timeout: 2000 }).then((r) => {
-			if (r.code === 0) {
-				gitBranch = r.stdout.trim() || "detached";
-				widgetTui?.requestRender();
-			}
-		}).catch(() => {});
-		refreshWorktree();
-		widgetTui?.requestRender();
+		refreshAndRender(ctx);
+		void refreshGit(ctx);
 	});
-
-	pi.on("tool_call", async (event, ctx) => {
-		currentCtx = ctx;
-		status = "tool";
-		toolName = event.toolName;
-		toolStartTime = Date.now();
-		startStaleTimer();
-		widgetTui?.requestRender();
-	});
-
-	pi.on("tool_result", async (event, ctx) => {
-		currentCtx = ctx;
-		clearStaleTimer();
-		status = event.isError ? "error" : "running";
-		toolName = undefined;
-		widgetTui?.requestRender();
-	});
-
-	pi.on("turn_end", async (_event, ctx) => {
-		currentCtx = ctx;
-		refreshContext();
-		// Populate first user text lazily if session was empty at install time
-		if (!firstUserText) firstUserText = extractFirstUserText(ctx);
-		widgetTui?.requestRender();
-	});
-
+	pi.on("tool_call", async (_event, ctx) => { refreshAndRender(ctx); });
+	pi.on("tool_result", async (_event, ctx) => { refreshAndRender(ctx); });
+	pi.on("turn_end", async (_event, ctx) => { refreshAndRender(ctx); });
+	pi.on("thinking_level_select", async () => { requestChromeRender(); });
 	pi.on("model_select", async (event, ctx) => {
 		currentCtx = ctx;
-		model = event.model.id;
-		modelProvider = event.model.provider;
-		widgetTui?.requestRender();
+		refreshContext(ctx);
+		contextWindow = event.model.contextWindow ?? contextWindow;
+		requestChromeRender();
 	});
-
-	// ── Toggle command ───────────────────────────────────────
 
 	async function toggleSessionHud(ctx: ExtensionContext) {
 		enabled = !enabled;
@@ -809,10 +535,15 @@ export default function (pi: ExtensionAPI) {
 			install(ctx);
 			ctx.ui.notify("Session HUD enabled", "info");
 		} else {
+			disposed = true;
+			clearGitPoll();
+			clearEditorInstallTimer();
+			footerTui = null;
+			editorTui = null;
+			ctx.ui.setFooter(undefined);
+			ctx.ui.setEditorComponent(undefined);
 			ctx.ui.setWidget(WIDGET_ID, undefined);
 			ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
-			if (gitPollTimer) { clearInterval(gitPollTimer); gitPollTimer = null; }
-			clearStaleTimer();
 			ctx.ui.notify("Session HUD disabled", "info");
 		}
 	}

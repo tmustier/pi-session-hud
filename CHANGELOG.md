@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0] - 2026-06-23
+
+- Replace the below-editor widget plus default Pi footer with a single compact context/location footer line.
+- Remove the duplicated cwd footer row and extension status row from the area below the input box.
+- Keep context bar/text colours for quick context-usage scanning.
+- Restore git diff stats after the project/branch label (`+x -y`, with `~` for dirty-without-line-count changes).
+- Move model/thinking into the top editor border and keep provider in the bottom editor border.
+- Add a one-column editor gutter and wrap the input inside a full border.
+- Add a one-space matching footer gutter so the context/location line aligns with editor content.
+- Render the footer `│` divider in the same muted grey as the provider label.
+- Italicize the first-message session fallback after the project path.
+- Include the session name, or the first few words of the first user message when unnamed, after the project path.
+
 ## [0.1.8] - 2026-06-10
 
 - Preserve the HUD background fill on truncated lines in narrow terminals by padding after truncation with the status background reapplied, including after hard ANSI resets emitted by `truncateToWidth()`.
