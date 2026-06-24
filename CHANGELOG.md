@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-06-24
+
+- Render unnamed first-message session fallbacks in muted grey instead of italics.
+- Render named sessions in the normal white text colour.
+
 ## [0.2.0] - 2026-06-23
 
 - Replace the below-editor widget plus default Pi footer with a single compact context/location footer line.
@@ -10,7 +15,7 @@
 - Add a one-column editor gutter and wrap the input inside a full border.
 - Add a one-space matching footer gutter so the context/location line aligns with editor content.
 - Render the footer `│` divider in the same muted grey as the provider label.
-- Italicize the first-message session fallback after the project path.
+- Italicize the first-message session fallback after the project path. (Revised in 0.2.1.)
 - Include the session name, or the first few words of the first user message when unnamed, after the project path.
 
 ## [0.1.8] - 2026-06-10

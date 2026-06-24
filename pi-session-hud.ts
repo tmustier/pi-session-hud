@@ -27,10 +27,9 @@ const EDITOR_GUTTER_WIDTH = 1;
 const FOOTER_GUTTER_WIDTH = EDITOR_GUTTER_WIDTH;
 
 const RESET = "\x1b[0m";
-const ITALIC_ON = "\x1b[3m";
-const ITALIC_OFF = "\x1b[23m";
 const FG_DIM = "\x1b[38;2;90;90;90m";
 const FG_MUTED = "\x1b[38;2;128;128;128m";
+const FG_TEXT = "\x1b[38;2;255;255;255m";
 const DIFF_GREEN = "\x1b[38;2;100;200;120m";
 const DIFF_RED = "\x1b[38;2;240;100;100m";
 const CONTEXT_GREEN = "\x1b[38;2;100;200;120m";
@@ -48,7 +47,6 @@ const CONTEXT_WARNING_LEVELS = {
 type ContextBand = "healthy" | "yellow" | "amber" | "red";
 type HudTheme = {
 	fg?: (color: string, text: string) => string;
-	italic?: (text: string) => string;
 };
 
 function fmtTokens(n: number): string {
@@ -250,12 +248,12 @@ function muted(text: string, theme?: HudTheme): string {
 	return theme?.fg ? theme.fg("muted", text) : `${FG_MUTED}${text}${RESET}`;
 }
 
-function italic(text: string, theme?: HudTheme): string {
-	return theme?.italic ? theme.italic(text) : `${ITALIC_ON}${text}${ITALIC_OFF}`;
+function textColor(text: string, theme?: HudTheme): string {
+	return theme?.fg ? theme.fg("text", text) : `${FG_TEXT}${text}${RESET}`;
 }
 
 function styleSessionLabel(label: string, isFallback: boolean, theme?: HudTheme): string {
-	return isFallback ? italic(label, theme) : label;
+	return isFallback ? muted(label, theme) : textColor(label, theme);
 }
 
 export default function (pi: ExtensionAPI) {

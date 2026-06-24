@@ -9,7 +9,7 @@ A tiny Pi extension that replaces Pi’s multi-line footer with one compact cont
  ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…
 ```
 
-Only the context bar/text and git diff stats use colour for quick visual scanning. The model/thinking label sits in the top editor border; the provider label stays in the bottom editor border. The footer has the same left gutter as the editor content, the `│` divider is muted grey, and first-message session fallbacks render in italics. There is no separate cwd/session-name row, activity status, extension status row, or background fill.
+Only the context bar/text, git diff stats, and session label use colour for quick visual scanning. The model/thinking label sits in the top editor border; the provider label stays in the bottom editor border. The footer has the same left gutter as the editor content, the `│` divider is muted grey, first-message session fallbacks render muted grey, and named sessions render white. There is no separate cwd/session-name row, activity status, extension status row, or background fill.
 
 ## What it shows
 
@@ -23,7 +23,7 @@ Only the context bar/text and git diff stats use colour for quick visual scannin
 - Top-border model + thinking label
 - Bottom-border provider label
 - One-column input gutter with word wrapping inside a full border
-- Matching footer gutter, muted divider, and italic first-message session fallback
+- Matching footer gutter, muted divider, grey first-message fallback, and white named session label
 
 ## Install
 
