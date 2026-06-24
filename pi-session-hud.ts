@@ -4,11 +4,12 @@
  * Shows:
  *   ╭──────────────────────────────────────── gpt-5.5 • xhigh ╮
  *   │ prompt text wraps inside a one-column gutter              │
- *   ╰───────────────────────────────────────── (openai-codex) ╯
- *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     44% left (weekly reset in 3d04h)
+ *   ╰────────────────────────────────────────────── 44% left ╯
+ *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     openai-codex weekly reset in 3d04h
  *
- * Minimal footer output: context usage, cwd/branch, git diff stats, and session.
- * The editor border carries model/thinking at the top and provider at the bottom.
+ * Minimal footer output: context usage, cwd/branch, git diff stats, session,
+ * and provider/reset detail. The editor border carries model/thinking at the top
+ * and the current usage metric at the bottom.
  *
  * Install:
  *   - pi install npm:@tmustier/pi-session-hud
@@ -16,7 +17,7 @@
  * Toggle: /hud (aliases: /status, /header)
  */
 
-import { CustomEditor, type ExtensionAPI, type ExtensionContext, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI, type ExtensionContext, type KeybindingsManager, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { type EditorTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const WIDGET_ID = "pi-session-hud";
@@ -53,7 +54,7 @@ const CONTEXT_WARNING_LEVELS = {
 
 type ContextBand = "healthy" | "yellow" | "amber" | "red";
 type HudTheme = {
-	fg?: (color: string, text: string) => string;
+	fg?: (color: ThemeColor, text: string) => string;
 };
 type SubscriptionUsage = {
 	usedPercent: number;
@@ -185,6 +186,15 @@ function fitLeftRight(left: string, right: string, width: number): string {
 	const leftFit = truncateToWidth(left, leftWidth, "…", false);
 	const padding = " ".repeat(Math.max(1, width - visibleWidth(leftFit) - rightWidth));
 	return `${leftFit}${padding}${right}${RESET}`;
+}
+
+function visibleFits(line: string, width: number): boolean {
+	return visibleWidth(line) <= width;
+}
+
+function fitsLeftRight(left: string, right: string, width: number): boolean {
+	if (!right) return visibleFits(left, width);
+	return visibleWidth(left) + visibleWidth(right) + 1 <= width;
 }
 
 function padAnsiLine(line: string, width: number): string {
@@ -373,10 +383,19 @@ function formatResetCountdown(resetAtMs: number): string {
 
 function formatUsageMetric(usage: SubscriptionUsage, theme?: HudTheme): string {
 	const percentLeft = Math.round(clamp(100 - usage.usedPercent, 0, 100));
-	const reset = usage.resetAtMs
-		? ` (weekly reset in ${formatResetCountdown(usage.resetAtMs)})`
-		: "";
-	return textColor(`${percentLeft}% left${reset}`, theme);
+	return muted(`${percentLeft}% left`, theme);
+}
+
+function formatProviderDetail(provider: string, usage: SubscriptionUsage | null, theme?: HudTheme): string {
+	if (!provider) return "";
+	if (usage?.resetAtMs) {
+		return muted(`${provider} weekly reset in ${formatResetCountdown(usage.resetAtMs)}  `, theme);
+	}
+	return muted(provider, theme);
+}
+
+function formatProviderDetailCompact(usage: SubscriptionUsage | null, theme?: HudTheme): string {
+	return usage?.resetAtMs ? muted(`${formatResetCountdown(usage.resetAtMs)}  `, theme) : "";
 }
 
 function formatSessionCost(cost: number, theme?: HudTheme): string {
@@ -689,8 +708,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function currentProviderLabel(): string {
-		const provider = currentCtx?.model?.provider;
-		return provider ? `(${provider})` : "";
+		return currentCtx?.model?.provider ?? "";
 	}
 
 	function currentSubscriptionUsage(): SubscriptionUsage | null {
@@ -702,13 +720,19 @@ export default function (pi: ExtensionAPI) {
 		return null;
 	}
 
-	function footerMetric(theme?: HudTheme): string {
+	function inputUsageMetric(theme?: HudTheme): string {
 		const subscriptionUsage = currentSubscriptionUsage();
 		if (subscriptionUsage) return formatUsageMetric(subscriptionUsage, theme);
+		if (!isUsingSubscriptionAuth(currentCtx)) return formatSessionCost(sessionCost(currentCtx), theme);
+		return "";
+	}
 
-		const cost = sessionCost(currentCtx);
-		if (!isUsingSubscriptionAuth(currentCtx)) return formatSessionCost(cost, theme);
-		return cost > 0 ? formatSessionCost(cost, theme) : "";
+	function footerProviderDetail(theme?: HudTheme): string {
+		return formatProviderDetail(currentProviderLabel(), currentSubscriptionUsage(), theme);
+	}
+
+	function footerProviderDetailCompact(theme?: HudTheme): string {
+		return formatProviderDetailCompact(currentSubscriptionUsage(), theme);
 	}
 
 	function requestChromeRender() {
@@ -730,25 +754,41 @@ export default function (pi: ExtensionAPI) {
 			const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
 			const tokUsed = contextTokens === null ? "?" : fmtTokens(contextTokens);
 			const tokWindow = fmtTokens(contextWindow);
-			const contextPart = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}/${tokWindow}${RESET}`;
+			const contextFull = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}/${tokWindow}${RESET}`;
+			const contextCompact = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}${RESET}`;
 
 			const cwd = currentCtx?.cwd ?? process.cwd();
 			const branch = footerData?.getGitBranch?.();
 			const diffStats = formatDiffStats(gitAdded, gitRemoved, gitDirty);
 			const location = `${displayPath(cwd)}${branch ? ` (${branch})` : ""}${diffStats}`;
+			const locationCompact = branch ? `(${branch})${diffStats}` : (diffStats.trim() || displayPath(cwd));
 			const sessionName = normalizeText(pi.getSessionName() ?? "");
 			const isFallbackSessionLabel = !sessionName && Boolean(firstUserText);
 			const sessionLabelRaw = sessionName || (firstUserText ? firstWords(firstUserText) : "");
 			const sessionLabel = sessionLabelRaw ? styleSessionLabel(sessionLabelRaw, isFallbackSessionLabel, theme) : "";
 			const divider = muted("│", theme);
 			const sessionDivider = muted("|", theme);
-			const footerContent = sessionLabel
-				? `${contextPart} ${divider} ${location} ${sessionDivider} ${sessionLabel}`
-				: `${contextPart} ${divider} ${location}`;
-			const left = `${" ".repeat(FOOTER_GUTTER_WIDTH)}${footerContent}`;
-			const right = footerMetric(theme);
+			const gutter = " ".repeat(FOOTER_GUTTER_WIDTH);
+			const fullLeftBase = `${gutter}${contextFull} ${divider} ${location}`;
+			const compactLeftBase = `${gutter}${contextCompact} ${divider} ${location}`;
+			const fullLeft = sessionLabel ? `${fullLeftBase} ${sessionDivider} ${sessionLabel}` : fullLeftBase;
+			const compactLeft = sessionLabel ? `${compactLeftBase} ${sessionDivider} ${sessionLabel}` : compactLeftBase;
+			const rightFull = footerProviderDetail(theme);
+			const rightCompact = footerProviderDetailCompact(theme);
 
-			return [fitLeftRight(left, right, width)];
+			if (fitsLeftRight(fullLeft, rightFull, width)) return [fitLeftRight(fullLeft, rightFull, width)];
+			if (fitsLeftRight(compactLeft, rightCompact, width)) return [fitLeftRight(compactLeft, rightCompact, width)];
+			if (fitsLeftRight(compactLeftBase, rightCompact, width)) return [fitLeftRight(compactLeftBase, rightCompact, width)];
+			if (visibleFits(compactLeft, width)) return [fitLine(compactLeft, width)];
+			if (visibleFits(compactLeftBase, width)) {
+				return sessionLabel
+					? [fitLine(compactLeftBase, width), fitLine(`${gutter}${sessionLabel}`, width)]
+					: [fitLine(compactLeftBase, width)];
+			}
+
+			const lines = [fitLine(`${gutter}${contextCompact}`, width), fitLine(`${gutter}${locationCompact}`, width)];
+			if (sessionLabel) lines.push(fitLine(`${gutter}${sessionLabel}`, width));
+			return lines;
 		} catch (err) {
 			if (isStaleExtensionError(err)) return [""];
 			throw err;
@@ -810,11 +850,11 @@ export default function (pi: ExtensionAPI) {
 					const topIndicator = scrollIndicator(lines[0] ?? "");
 					const bottomIndicator = scrollIndicator(lines[bottomIndex] ?? "");
 					const modelLabel = currentModelLabel();
-					const providerLabel = currentProviderLabel();
+					const usageMetric = inputUsageMetric(theme);
 					const topLeft = topIndicator ? theme.fg("dim", ` ${topIndicator} `) : "";
 					const bottomLeft = bottomIndicator ? theme.fg("dim", ` ${bottomIndicator} `) : "";
 					const topRight = modelLabel ? theme.fg("accent", ` ${modelLabel} `) : "";
-					const bottomRight = providerLabel ? theme.fg("muted", ` ${providerLabel} `) : "";
+					const bottomRight = usageMetric ? ` ${usageMetric} ` : "";
 					const rendered: string[] = [
 						fitHorizontalBorder(topLeft, topRight, width, border, "╭", "╮"),
 					];

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2] - 2026-06-24
+
+- Move the usage metric into the input box bottom border.
+- Move provider/reset detail to the footer right side without parentheses, in muted grey.
+- Show only the provider name in the footer when using API-key billing.
+- Make the footer responsive: preserve context + repo/branch/diff before session text, collapse reset detail to countdown-only, then hide it on very narrow terminals.
+
 ## [0.3.1] - 2026-06-24
 
 - Change subscription quota display from weekly percent used to weekly percent left.
