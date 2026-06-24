@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.1] - 2026-06-24
+
+- Change subscription quota display from weekly percent used to weekly percent left.
+- Replace `ahead +x%` with a weekly reset countdown, for example `44% left (weekly reset in 3d04h)`.
+
 ## [0.3.0] - 2026-06-24
 
 - Add a right-aligned footer usage slot below the input box.

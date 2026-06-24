@@ -5,7 +5,7 @@
  *   ╭──────────────────────────────────────── gpt-5.5 • xhigh ╮
  *   │ prompt text wraps inside a one-column gutter              │
  *   ╰───────────────────────────────────────── (openai-codex) ╯
- *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     $0.042
+ *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     44% left (weekly reset in 3d04h)
  *
  * Minimal footer output: context usage, cwd/branch, git diff stats, and session.
  * The editor border carries model/thinking at the top and provider at the bottom.
@@ -56,8 +56,7 @@ type HudTheme = {
 	fg?: (color: string, text: string) => string;
 };
 type SubscriptionUsage = {
-	percent: number;
-	aheadPercent: number | null;
+	usedPercent: number;
 	provider: string;
 	observedAt: number;
 	resetAtMs?: number;
@@ -303,14 +302,6 @@ function getHeader(headers: Record<string, string>, name: string): string | unde
 	return undefined;
 }
 
-function computeAheadPercent(usedPercent: number, resetAtMs?: number, windowMs?: number): number | null {
-	if (!resetAtMs || !windowMs || windowMs <= 0) return null;
-	const windowStartMs = resetAtMs - windowMs;
-	const elapsedPercent = clamp(((Date.now() - windowStartMs) / windowMs) * 100, 0, 100);
-	const ahead = usedPercent - elapsedPercent;
-	return ahead > 0 ? ahead : null;
-}
-
 function makeSubscriptionUsage(
 	provider: string,
 	usedPercent: number,
@@ -320,8 +311,7 @@ function makeSubscriptionUsage(
 	const resetAtMs = resetAtSeconds && resetAtSeconds > 0 ? resetAtSeconds * 1000 : undefined;
 	return {
 		provider,
-		percent: clamp(usedPercent, 0, 100),
-		aheadPercent: computeAheadPercent(usedPercent, resetAtMs, windowMs),
+		usedPercent: clamp(usedPercent, 0, 100),
 		observedAt: Date.now(),
 		...(resetAtMs ? { resetAtMs } : {}),
 		...(windowMs ? { windowMs } : {}),
@@ -373,12 +363,20 @@ function parseSubscriptionUsageFromHeaders(provider: string | undefined, headers
 	return parseAnthropicSubscriptionUsageFromHeaders(headers) ?? parseCodexSubscriptionUsageFromHeaders(headers);
 }
 
+function formatResetCountdown(resetAtMs: number): string {
+	const remainingMs = Math.max(0, resetAtMs - Date.now());
+	const totalHours = remainingMs === 0 ? 0 : Math.ceil(remainingMs / (60 * 60 * 1000));
+	const days = Math.floor(totalHours / 24);
+	const hours = totalHours % 24;
+	return `${days}d${String(hours).padStart(2, "0")}h`;
+}
+
 function formatUsageMetric(usage: SubscriptionUsage, theme?: HudTheme): string {
-	const percent = `${Math.round(usage.percent)}%`;
-	const ahead = usage.aheadPercent && usage.aheadPercent >= 1
-		? ` (ahead +${Math.round(usage.aheadPercent)}%)`
+	const percentLeft = Math.round(clamp(100 - usage.usedPercent, 0, 100));
+	const reset = usage.resetAtMs
+		? ` (weekly reset in ${formatResetCountdown(usage.resetAtMs)})`
 		: "";
-	return textColor(`${percent}${ahead}`, theme);
+	return textColor(`${percentLeft}% left${reset}`, theme);
 }
 
 function formatSessionCost(cost: number, theme?: HudTheme): string {
