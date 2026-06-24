@@ -5,7 +5,7 @@
  *   ╭──────────────────────────────────────── gpt-5.5 • xhigh ╮
  *   │ prompt text wraps inside a one-column gutter              │
  *   ╰───────────────────────────────────────── (openai-codex) ╯
- *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…
+ *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     $0.042
  *
  * Minimal footer output: context usage, cwd/branch, git diff stats, and session.
  * The editor border carries model/thinking at the top and provider at the bottom.
@@ -25,6 +25,13 @@ const CONTEXT_BAR_WIDTH = 6;
 const SESSION_FALLBACK_WORDS = 8;
 const EDITOR_GUTTER_WIDTH = 1;
 const FOOTER_GUTTER_WIDTH = EDITOR_GUTTER_WIDTH;
+const SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS = new Set(["openai-codex", "openai", "anthropic"]);
+const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const ONE_WEEK_MINUTES = 7 * 24 * 60;
+const SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS = 5 * 60 * 1000;
+const SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS = 60 * 1000;
+const ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20";
+const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 
 const RESET = "\x1b[0m";
 const FG_DIM = "\x1b[38;2;90;90;90m";
@@ -47,6 +54,20 @@ const CONTEXT_WARNING_LEVELS = {
 type ContextBand = "healthy" | "yellow" | "amber" | "red";
 type HudTheme = {
 	fg?: (color: string, text: string) => string;
+};
+type SubscriptionUsage = {
+	percent: number;
+	aheadPercent: number | null;
+	provider: string;
+	observedAt: number;
+	resetAtMs?: number;
+	windowMs?: number;
+};
+
+type RateLimitWindowUsage = {
+	usedPercent: number;
+	windowMinutes?: number;
+	resetAtSeconds?: number;
 };
 
 function fmtTokens(n: number): string {
@@ -256,6 +277,279 @@ function styleSessionLabel(label: string, isFallback: boolean, theme?: HudTheme)
 	return isFallback ? muted(label, theme) : textColor(label, theme);
 }
 
+function numberFrom(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string" && value.trim()) {
+		const parsed = Number(value);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	return undefined;
+}
+
+function normalizeUsagePercent(value: unknown): number | undefined {
+	const parsed = numberFrom(value);
+	if (parsed === undefined) return undefined;
+	const percent = parsed <= 1 ? parsed * 100 : parsed;
+	return clamp(percent, 0, 100);
+}
+
+function getHeader(headers: Record<string, string>, name: string): string | undefined {
+	const direct = headers[name];
+	if (direct !== undefined) return direct;
+	const lowerName = name.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === lowerName) return value;
+	}
+	return undefined;
+}
+
+function computeAheadPercent(usedPercent: number, resetAtMs?: number, windowMs?: number): number | null {
+	if (!resetAtMs || !windowMs || windowMs <= 0) return null;
+	const windowStartMs = resetAtMs - windowMs;
+	const elapsedPercent = clamp(((Date.now() - windowStartMs) / windowMs) * 100, 0, 100);
+	const ahead = usedPercent - elapsedPercent;
+	return ahead > 0 ? ahead : null;
+}
+
+function makeSubscriptionUsage(
+	provider: string,
+	usedPercent: number,
+	windowMs?: number,
+	resetAtSeconds?: number,
+): SubscriptionUsage {
+	const resetAtMs = resetAtSeconds && resetAtSeconds > 0 ? resetAtSeconds * 1000 : undefined;
+	return {
+		provider,
+		percent: clamp(usedPercent, 0, 100),
+		aheadPercent: computeAheadPercent(usedPercent, resetAtMs, windowMs),
+		observedAt: Date.now(),
+		...(resetAtMs ? { resetAtMs } : {}),
+		...(windowMs ? { windowMs } : {}),
+	};
+}
+
+function isApproximateWindow(minutes: number | undefined, expectedMinutes: number): boolean {
+	if (!minutes || minutes <= 0) return false;
+	return minutes >= expectedMinutes * 0.95 && minutes <= expectedMinutes * 1.05;
+}
+
+function selectWeeklyWindow(windows: Array<RateLimitWindowUsage | null | undefined>): RateLimitWindowUsage | null {
+	const weekly = windows
+		.filter((window): window is RateLimitWindowUsage => Boolean(window && isApproximateWindow(window.windowMinutes, ONE_WEEK_MINUTES)))
+		.sort((a, b) => (b.windowMinutes ?? 0) - (a.windowMinutes ?? 0));
+	return weekly[0] ?? null;
+}
+
+function parseCodexHeaderWindow(headers: Record<string, string>, slot: "primary" | "secondary"): RateLimitWindowUsage | null {
+	const usedPercent = normalizeUsagePercent(getHeader(headers, `x-codex-${slot}-used-percent`));
+	if (usedPercent === undefined) return null;
+	return {
+		usedPercent,
+		windowMinutes: numberFrom(getHeader(headers, `x-codex-${slot}-window-minutes`)),
+		resetAtSeconds: numberFrom(getHeader(headers, `x-codex-${slot}-reset-at`)),
+	};
+}
+
+function parseCodexSubscriptionUsageFromHeaders(headers: Record<string, string>): SubscriptionUsage | null {
+	const weekly = selectWeeklyWindow([
+		parseCodexHeaderWindow(headers, "primary"),
+		parseCodexHeaderWindow(headers, "secondary"),
+	]);
+	return weekly
+		? makeSubscriptionUsage("openai-codex", weekly.usedPercent, ONE_WEEK_MS, weekly.resetAtSeconds)
+		: null;
+}
+
+function parseAnthropicSubscriptionUsageFromHeaders(headers: Record<string, string>): SubscriptionUsage | null {
+	const usedPercent = normalizeUsagePercent(getHeader(headers, "anthropic-ratelimit-unified-7d-utilization"));
+	if (usedPercent === undefined) return null;
+	const resetAtSeconds = numberFrom(getHeader(headers, "anthropic-ratelimit-unified-7d-reset"));
+	return makeSubscriptionUsage("anthropic", usedPercent, ONE_WEEK_MS, resetAtSeconds);
+}
+
+function parseSubscriptionUsageFromHeaders(provider: string | undefined, headers: Record<string, string>): SubscriptionUsage | null {
+	if (provider === "anthropic") return parseAnthropicSubscriptionUsageFromHeaders(headers);
+	if (provider === "openai-codex" || provider === "openai") return parseCodexSubscriptionUsageFromHeaders(headers);
+	return parseAnthropicSubscriptionUsageFromHeaders(headers) ?? parseCodexSubscriptionUsageFromHeaders(headers);
+}
+
+function formatUsageMetric(usage: SubscriptionUsage, theme?: HudTheme): string {
+	const percent = `${Math.round(usage.percent)}%`;
+	const ahead = usage.aheadPercent && usage.aheadPercent >= 1
+		? ` (ahead +${Math.round(usage.aheadPercent)}%)`
+		: "";
+	return textColor(`${percent}${ahead}`, theme);
+}
+
+function formatSessionCost(cost: number, theme?: HudTheme): string {
+	const amount = Math.max(0, cost);
+	const digits = amount < 1 ? 3 : 2;
+	return muted(`$${amount.toFixed(digits)}`, theme);
+}
+
+function sessionCost(ctx: ExtensionContext | null): number {
+	if (!ctx) return 0;
+	try {
+		const sessionManager = ctx.sessionManager as any;
+		const entries: any[] = sessionManager.getBranch?.() ?? sessionManager.getEntries?.() ?? [];
+		return entries.reduce((total, entry) => {
+			if (entry?.type !== "message" || entry.message?.role !== "assistant") return total;
+			return total + (numberFrom(entry.message.usage?.cost?.total) ?? 0);
+		}, 0);
+	} catch {
+		return 0;
+	}
+}
+
+function isUsingSubscriptionAuth(ctx: ExtensionContext | null): boolean {
+	try {
+		if (!ctx?.model) return false;
+		return Boolean(ctx.modelRegistry.isUsingOAuth(ctx.model as any));
+	} catch {
+		return false;
+	}
+}
+
+function oauthCredential(ctx: ExtensionContext, provider: string): any | undefined {
+	try {
+		const credential = ctx.modelRegistry.authStorage.get(provider) as any;
+		return credential?.type === "oauth" ? credential : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function base64UrlDecodeJson(part: string): any | undefined {
+	try {
+		const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
+		const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+		return JSON.parse(globalThis.atob(padded));
+	} catch {
+		return undefined;
+	}
+}
+
+function extractChatGptAccountId(token: string, credential?: any): string | undefined {
+	const fromCredential = credential?.accountId ?? credential?.account_id ?? credential?.chatgpt_account_id;
+	if (typeof fromCredential === "string" && fromCredential) return fromCredential;
+	const payload = base64UrlDecodeJson(token.split(".")[1] ?? "");
+	const authClaim = payload?.["https://api.openai.com/auth"];
+	const fromToken = authClaim?.chatgpt_account_id ?? authClaim?.account_id;
+	return typeof fromToken === "string" && fromToken ? fromToken : undefined;
+}
+
+function resolveCodexBackendBaseUrl(baseUrl: string | undefined): string {
+	let normalized = (baseUrl || DEFAULT_CODEX_BASE_URL).replace(/\/+$/, "");
+	if (normalized.endsWith("/codex/responses")) normalized = normalized.slice(0, -"/codex/responses".length);
+	else if (normalized.endsWith("/codex")) normalized = normalized.slice(0, -"/codex".length);
+	return normalized || DEFAULT_CODEX_BASE_URL;
+}
+
+async function fetchJson(url: string, headers: Record<string, string>, timeoutMs = 5000): Promise<unknown | null> {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		const response = await fetch(url, { headers, signal: controller.signal });
+		if (!response.ok) return null;
+		return await response.json();
+	} catch {
+		return null;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+function parseCodexPayloadWindow(window: any): RateLimitWindowUsage | null {
+	if (!window || typeof window !== "object") return null;
+	const usedPercent = normalizeUsagePercent(window.used_percent ?? window.usedPercent ?? window.utilization);
+	if (usedPercent === undefined) return null;
+	const windowSeconds = numberFrom(window.limit_window_seconds ?? window.window_seconds ?? window.windowSeconds);
+	const windowMinutes = numberFrom(window.window_minutes ?? window.window_duration_mins ?? window.windowMinutes)
+		?? (windowSeconds ? Math.ceil(windowSeconds / 60) : undefined);
+	return {
+		usedPercent,
+		windowMinutes,
+		resetAtSeconds: numberFrom(window.reset_at ?? window.resets_at ?? window.resetAt),
+	};
+}
+
+function collectCodexPayloadWindows(payload: any): RateLimitWindowUsage[] {
+	const windows: RateLimitWindowUsage[] = [];
+	const addRateLimit = (rateLimit: any) => {
+		if (!rateLimit || typeof rateLimit !== "object") return;
+		const primary = parseCodexPayloadWindow(rateLimit.primary_window ?? rateLimit.primary);
+		const secondary = parseCodexPayloadWindow(rateLimit.secondary_window ?? rateLimit.secondary);
+		if (primary) windows.push(primary);
+		if (secondary) windows.push(secondary);
+	};
+	addRateLimit(payload?.rate_limit);
+	const additional = Array.isArray(payload?.additional_rate_limits) ? payload.additional_rate_limits : [];
+	for (const detail of additional) addRateLimit(detail?.rate_limit);
+	return windows;
+}
+
+function parseCodexSubscriptionUsagePayload(payload: unknown): SubscriptionUsage | null {
+	const weekly = selectWeeklyWindow(collectCodexPayloadWindows(payload));
+	return weekly
+		? makeSubscriptionUsage("openai-codex", weekly.usedPercent, ONE_WEEK_MS, weekly.resetAtSeconds)
+		: null;
+}
+
+function parseAnthropicSubscriptionUsagePayload(payload: any): SubscriptionUsage | null {
+	const weekly = payload?.seven_day ?? payload?.seven_day_oauth_apps;
+	const usedPercent = normalizeUsagePercent(weekly?.utilization);
+	if (usedPercent === undefined) return null;
+	const resetAtMs = typeof weekly?.resets_at === "string" ? Date.parse(weekly.resets_at) : undefined;
+	const resetAtSeconds = resetAtMs && Number.isFinite(resetAtMs) ? resetAtMs / 1000 : undefined;
+	return makeSubscriptionUsage("anthropic", usedPercent, ONE_WEEK_MS, resetAtSeconds);
+}
+
+async function fetchCodexSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
+	const provider = ctx.model?.provider;
+	if (provider !== "openai-codex" && provider !== "openai") return null;
+	const token = await ctx.modelRegistry.getApiKeyForProvider(provider);
+	if (!token) return null;
+	const credential = oauthCredential(ctx, provider);
+	const accountId = extractChatGptAccountId(token, credential);
+	if (!accountId) return null;
+	const base = resolveCodexBackendBaseUrl((ctx.model as any)?.baseUrl);
+	const headers = {
+		Authorization: `Bearer ${token}`,
+		"chatgpt-account-id": accountId,
+		originator: "pi-session-hud",
+		"User-Agent": "pi-session-hud",
+		accept: "application/json",
+	};
+	for (const path of ["/api/codex/usage", "/wham/usage"]) {
+		const payload = await fetchJson(`${base}${path}`, headers);
+		const usage = payload ? parseCodexSubscriptionUsagePayload(payload) : null;
+		if (usage) return usage;
+	}
+	return null;
+}
+
+async function fetchAnthropicSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
+	if (ctx.model?.provider !== "anthropic") return null;
+	const token = await ctx.modelRegistry.getApiKeyForProvider("anthropic");
+	if (!token) return null;
+	const payload = await fetchJson("https://api.anthropic.com/api/oauth/usage", {
+		Authorization: `Bearer ${token}`,
+		"anthropic-beta": ANTHROPIC_OAUTH_BETA,
+		"User-Agent": "pi-session-hud",
+		accept: "application/json",
+	});
+	return payload ? parseAnthropicSubscriptionUsagePayload(payload) : null;
+}
+
+async function fetchProviderSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
+	if (!isUsingSubscriptionAuth(ctx)) return null;
+	if (ctx.model?.provider === "anthropic") return fetchAnthropicSubscriptionUsage(ctx);
+	if (ctx.model?.provider === "openai-codex" || ctx.model?.provider === "openai") {
+		return fetchCodexSubscriptionUsage(ctx);
+	}
+	return null;
+}
+
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
 	let contextPercent: number | null = null;
@@ -265,11 +559,15 @@ export default function (pi: ExtensionAPI) {
 	let gitRemoved = 0;
 	let gitDirty = false;
 	let gitPollTimer: ReturnType<typeof setInterval> | null = null;
+	let subscriptionProbeTimer: ReturnType<typeof setInterval> | null = null;
 	let editorInstallTimer: ReturnType<typeof setTimeout> | null = null;
 	let currentCtx: ExtensionContext | null = null;
 	let firstUserText: string | null = null;
 	let footerTui: TUI | null = null;
 	let editorTui: TUI | null = null;
+	let latestSubscriptionUsage: SubscriptionUsage | null = null;
+	let lastSubscriptionProbeAt = 0;
+	let subscriptionProbeInFlight = false;
 	let disposed = false;
 
 	function isStaleExtensionError(err: unknown): boolean {
@@ -300,10 +598,53 @@ export default function (pi: ExtensionAPI) {
 		gitPollTimer = null;
 	}
 
+	function clearSubscriptionProbe() {
+		if (!subscriptionProbeTimer) return;
+		clearInterval(subscriptionProbeTimer);
+		subscriptionProbeTimer = null;
+	}
+
 	function clearEditorInstallTimer() {
 		if (!editorInstallTimer) return;
 		clearTimeout(editorInstallTimer);
 		editorInstallTimer = null;
+	}
+
+	function providerSupportsSubscriptionUsage(ctx: ExtensionContext | null): boolean {
+		const provider = ctx?.model?.provider;
+		return Boolean(provider && SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS.has(provider));
+	}
+
+	function updateSubscriptionUsage(usage: SubscriptionUsage | null | undefined) {
+		if (!usage) return;
+		latestSubscriptionUsage = usage;
+		requestChromeRender();
+	}
+
+	async function refreshSubscriptionUsage(ctx: ExtensionContext | null = currentCtx, force = false) {
+		if (!ctx || disposed || !providerSupportsSubscriptionUsage(ctx) || !isUsingSubscriptionAuth(ctx)) return;
+		if (subscriptionProbeInFlight) return;
+		if (!force && Date.now() - lastSubscriptionProbeAt < SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS) return;
+
+		lastSubscriptionProbeAt = Date.now();
+		subscriptionProbeInFlight = true;
+		try {
+			const usage = await fetchProviderSubscriptionUsage(ctx);
+			if (disposed || ctx !== currentCtx) return;
+			updateSubscriptionUsage(usage);
+		} catch {
+			// Best-effort only: if provider quota probes fail, keep the HUD quiet.
+		} finally {
+			subscriptionProbeInFlight = false;
+		}
+	}
+
+	function startSubscriptionProbe(ctx: ExtensionContext) {
+		clearSubscriptionProbe();
+		latestSubscriptionUsage = null;
+		lastSubscriptionProbeAt = 0;
+		void refreshSubscriptionUsage(ctx, true);
+		subscriptionProbeTimer = setInterval(() => { void refreshSubscriptionUsage(); }, SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS);
 	}
 
 	async function refreshGit(ctx: ExtensionContext | null = currentCtx) {
@@ -354,6 +695,24 @@ export default function (pi: ExtensionAPI) {
 		return provider ? `(${provider})` : "";
 	}
 
+	function currentSubscriptionUsage(): SubscriptionUsage | null {
+		if (!currentCtx || !isUsingSubscriptionAuth(currentCtx) || !latestSubscriptionUsage) return null;
+		const provider = currentCtx.model?.provider;
+		if (provider === latestSubscriptionUsage.provider) return latestSubscriptionUsage;
+		if (provider === "openai" && latestSubscriptionUsage.provider === "openai-codex") return latestSubscriptionUsage;
+		if (provider === "openai-codex" && latestSubscriptionUsage.provider === "openai") return latestSubscriptionUsage;
+		return null;
+	}
+
+	function footerMetric(theme?: HudTheme): string {
+		const subscriptionUsage = currentSubscriptionUsage();
+		if (subscriptionUsage) return formatUsageMetric(subscriptionUsage, theme);
+
+		const cost = sessionCost(currentCtx);
+		if (!isUsingSubscriptionAuth(currentCtx)) return formatSessionCost(cost, theme);
+		return cost > 0 ? formatSessionCost(cost, theme) : "";
+	}
+
 	function requestChromeRender() {
 		footerTui?.requestRender();
 		editorTui?.requestRender();
@@ -389,8 +748,9 @@ export default function (pi: ExtensionAPI) {
 				? `${contextPart} ${divider} ${location} ${sessionDivider} ${sessionLabel}`
 				: `${contextPart} ${divider} ${location}`;
 			const left = `${" ".repeat(FOOTER_GUTTER_WIDTH)}${footerContent}`;
+			const right = footerMetric(theme);
 
-			return [fitLine(left, width)];
+			return [fitLeftRight(left, right, width)];
 		} catch (err) {
 			if (isStaleExtensionError(err)) return [""];
 			throw err;
@@ -410,6 +770,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
 		disposed = false;
 		startGitPoll(ctx);
+		startSubscriptionProbe(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			footerTui = tui;
 			const unsubscribeBranch = footerData?.onBranchChange?.(() => tui.requestRender());
@@ -420,6 +781,7 @@ export default function (pi: ExtensionAPI) {
 					disposed = true;
 					footerTui = null;
 					clearGitPoll();
+					clearSubscriptionProbe();
 					clearEditorInstallTimer();
 					if (typeof unsubscribeBranch === "function") unsubscribeBranch();
 				},
@@ -507,6 +869,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		disposed = true;
 		clearGitPoll();
+		clearSubscriptionProbe();
 		clearEditorInstallTimer();
 		footerTui = null;
 		editorTui = null;
@@ -515,6 +878,12 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async (_event, ctx) => {
 		refreshAndRender(ctx);
 		void refreshGit(ctx);
+		void refreshSubscriptionUsage(ctx);
+	});
+	pi.on("after_provider_response", async (event, ctx) => {
+		currentCtx = ctx;
+		const usage = parseSubscriptionUsageFromHeaders(ctx.model?.provider, event.headers);
+		updateSubscriptionUsage(usage);
 	});
 	pi.on("tool_call", async (_event, ctx) => { refreshAndRender(ctx); });
 	pi.on("tool_result", async (_event, ctx) => { refreshAndRender(ctx); });
@@ -524,6 +893,9 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = ctx;
 		refreshContext(ctx);
 		contextWindow = event.model.contextWindow ?? contextWindow;
+		latestSubscriptionUsage = null;
+		lastSubscriptionProbeAt = 0;
+		void refreshSubscriptionUsage(ctx, true);
 		requestChromeRender();
 	});
 
@@ -535,6 +907,7 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			disposed = true;
 			clearGitPoll();
+			clearSubscriptionProbe();
 			clearEditorInstallTimer();
 			footerTui = null;
 			editorTui = null;

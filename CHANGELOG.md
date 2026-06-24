@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0] - 2026-06-24
+
+- Add a right-aligned footer usage slot below the input box.
+- Show Pi's calculated session cost for non-subscription auth.
+- Show OpenAI/Codex weekly subscription utilisation when Codex rate-limit headers or the Codex usage endpoint provide it.
+- Show Anthropic weekly subscription utilisation when Anthropic rate-limit headers or the Claude OAuth usage endpoint provide it.
+- Add `ahead +x%` when provider usage is ahead of elapsed weekly-window time.
+
 ## [0.2.1] - 2026-06-24
 
 - Render unnamed first-message session fallbacks in muted grey instead of italics.
