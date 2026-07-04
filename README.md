@@ -1,6 +1,8 @@
-# /hud — Session HUD
+# pi-session-hud
 
-A tiny Pi extension that replaces Pi’s multi-line footer with one compact context/location/session line and gives the input box Amp-style model chrome.
+`pi-session-hud` replaces [Pi](https://github.com/earendil-works/pi)'s multi-line footer with one compact context/location/session line and gives the input box Amp-style chrome: model and thinking level in the top border, your remaining weekly quota (or session cost) in the bottom border, and provider/reset detail on the footer's right edge.
+
+![Session HUD editor chrome and footer](https://raw.githubusercontent.com/tmustier/pi-session-hud/main/assets/hud-chrome.png)
 
 ```text
 ╭──────────────────────────────────────── gpt-5.5 • xhigh ╮
@@ -9,48 +11,51 @@ A tiny Pi extension that replaces Pi’s multi-line footer with one compact cont
  ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     openai-codex weekly reset in 3d04h
 ```
 
-Only the context bar/text, git diff stats, session label, and right-side usage metric use colour for quick visual scanning. The model/thinking label sits in the top editor border; the usage metric sits in the bottom editor border; and the provider plus weekly reset timing sits below it in the footer. The footer has the same left gutter as the editor content, the `│` divider is muted grey, first-message session fallbacks render muted grey, and named sessions render white. There is no separate cwd/session-name row, activity status, extension status row, or background fill.
+Only the context bar/text, git diff stats, session label, and usage metric use colour, so the line stays scannable. The stock footer's separate cwd row, activity status, extension status row, and background fill are gone.
 
 ## What it shows
 
-- Colour-coded context usage bar
-- Colour-coded context percentage
-- Colour-coded used tokens / context window
-- Current working directory
-- Current git branch when available
-- Git diff stats (`+x -y`, or `~` for dirty-without-line-count changes)
-- Session name, or the first few words of the first user message when unnamed
-- Bottom-border session cost (`$0.000`) when not using subscription auth
-- Bottom-border weekly quota remaining when OpenAI/Codex or Anthropic OAuth usage data is available, for example `44% left`
-- Footer provider detail in muted grey, for example `openai-codex` or `openai-codex weekly reset in 3d04h`
-- Responsive footer collapse: keep context + repo/branch/diff first, then session text, while the right-side reset detail collapses to just the countdown and then disappears
-- Top-border model + thinking label
-- One-column input gutter with word wrapping inside a full border
-- Matching footer gutter, muted divider, grey first-message fallback, and white named session label
+The footer line, left to right:
+
+- colour-coded context usage bar, percentage, and used/window token counts
+- current working directory and git branch
+- git diff stats (`+x -y`, or `~` for dirty-without-line-count changes)
+- session name, or the first few words of the first user message when unnamed
+- right edge: provider detail, for example `openai-codex weekly reset in 3d04h`, or just the provider name on API-key billing
+
+The editor border:
+
+- top right: current model and thinking level, for example `gpt-5.5 • xhigh`
+- bottom right: `44% left` weekly subscription quota, or session cost (`$0.042`) when using API-key billing
+- one-column input gutter with word wrapping inside a full rounded border; scroll indicators (`↑ 3 more`) stay visible in the border
 
 ## Install
 
-### Pi package manager (npm)
+Install from npm:
 
 ```bash
 pi install npm:@tmustier/pi-session-hud
 ```
 
-### Pi package manager (git)
+Or from GitHub:
 
 ```bash
 pi install git:github.com/tmustier/pi-session-hud
 ```
 
-### Local clone
-
-Symlink into Pi’s auto-discovered extensions directory:
+Try it for one run without installing:
 
 ```bash
-ln -s ~/pi-session-hud/pi-session-hud.ts ~/.pi/agent/extensions/
+pi -e npm:@tmustier/pi-session-hud
 ```
 
-Or add to `~/.pi/agent/settings.json`:
+For local development from a clone:
+
+```bash
+pi -e ./pi-session-hud.ts
+```
+
+To persist a local clone, symlink it into Pi's auto-discovered extensions directory (`ln -s ~/pi-session-hud/pi-session-hud.ts ~/.pi/agent/extensions/`) or add it to `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -58,13 +63,24 @@ Or add to `~/.pi/agent/settings.json`:
 }
 ```
 
-## Usage
+## Use
 
-In Pi:
+The HUD installs itself on session start and survives `/reload`, `/resume`, and model switches.
 
-- Toggle HUD: `/hud`
-- Aliases: `/status`, `/header`
+- `/hud` toggles the HUD on and off (restoring Pi's stock footer and editor)
+- `/status` and `/header` are aliases
+
+How to read the numbers:
+
+- context colours run green → yellow-green → amber → red; thresholds are calibrated to a GPT-5.5-sized (272k) window and applied as absolute token counts on larger windows, so 1M-token models start warning at the same real usage instead of staying green too long
+- `?` in the context slot means Pi has no fresh usage data yet, for example right after compaction
+- named sessions render white; the unnamed fallback (first words of your first message) renders muted grey
+- `44% left` is your weekly subscription quota remaining; it appears when Pi is authenticated via OpenAI Codex or Anthropic subscription OAuth
+- quota comes from provider rate-limit headers on each response, plus a background probe of the provider usage endpoint every 5 minutes; if neither is available the metric simply stays absent
+- on API-key billing the bottom border shows Pi's calculated session cost instead
+
+On narrow terminals the footer collapses gracefully: context + repo/branch/diff survive first, then the session label; the right-side reset detail shrinks to just the countdown (`3d04h`) and then disappears.
 
 ## Changelog
 
-See `CHANGELOG.md`.
+See [`CHANGELOG.md`](./CHANGELOG.md).
