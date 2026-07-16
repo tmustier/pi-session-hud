@@ -49,6 +49,10 @@ export function effectiveContextWindow(providerContextWindow: number, autoCompac
 	return autoCompactThreshold;
 }
 
+export function isContextWindowCapped(providerContextWindow: number, displayContextWindow: number): boolean {
+	return providerContextWindow > 0 && displayContextWindow < providerContextWindow;
+}
+
 export function effectiveContextPercent(
 	providerPercent: number | null,
 	tokens: number | null,

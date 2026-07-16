@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.1] - 2026-07-16
+
+- Keep the established fixed token colour bands when auto-compact lowers the displayed context window.
+- Add a muted down arrow to capped context limits, for example `10k/200k↓`.
+
 ## [0.4.0] - 2026-07-15
 
 - Use the active `pi-auto-compact` threshold as the HUD context limit when it is lower than the provider context window.
