@@ -19,6 +19,16 @@
 
 import { CustomEditor, type ExtensionAPI, type ExtensionContext, type KeybindingsManager, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { type EditorTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	AUTO_COMPACT_POLICY_EVENT,
+	AUTO_COMPACT_POLICY_REQUEST_EVENT,
+	effectiveContextPercent,
+	effectiveContextWindow,
+	parseAutoCompactPolicySnapshot,
+	sameModel,
+	type AutoCompactPolicySnapshot,
+	type ModelIdentity,
+} from "./auto-compact-limit.js";
 
 const WIDGET_ID = "pi-session-hud";
 const LEGACY_WIDGET_ID = "pi-status-bar";
@@ -586,6 +596,28 @@ export default function (pi: ExtensionAPI) {
 	let lastSubscriptionProbeAt = 0;
 	let subscriptionProbeInFlight = false;
 	let disposed = false;
+	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
+
+	function selectedModelIdentity(ctx: ExtensionContext | null): ModelIdentity | undefined {
+		const model = ctx?.model;
+		return model ? { api: model.api, provider: model.provider, id: model.id } : undefined;
+	}
+
+	const unregisterAutoCompactPolicy = pi.events.on(AUTO_COMPACT_POLICY_EVENT, (data) => {
+		const snapshot = parseAutoCompactPolicySnapshot(data);
+		const currentModel = selectedModelIdentity(currentCtx);
+		if (!snapshot || !currentModel || !sameModel(snapshot.model, currentModel)) return;
+		autoCompactPolicy = snapshot;
+		refreshContext();
+		requestChromeRender();
+	});
+
+	function requestAutoCompactPolicy(ctx: ExtensionContext) {
+		autoCompactPolicy = null;
+		const model = selectedModelIdentity(ctx);
+		if (!model) return;
+		pi.events.emit(AUTO_COMPACT_POLICY_REQUEST_EVENT, { protocolVersion: 1, model });
+	}
 
 	function isStaleExtensionError(err: unknown): boolean {
 		const message = err instanceof Error ? err.message : String(err ?? "");
@@ -598,15 +630,15 @@ export default function (pi: ExtensionAPI) {
 		if (!firstUserText) firstUserText = extractFirstUserText(ctx);
 
 		const usage = ctx.getContextUsage();
-		if (usage) {
-			contextPercent = usage.percent;
-			contextTokens = usage.tokens;
-			contextWindow = usage.contextWindow;
-		} else {
-			contextPercent = null;
-			contextTokens = null;
-			contextWindow = ctx.model?.contextWindow ?? 0;
-		}
+		const providerContextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+		contextTokens = usage?.tokens ?? null;
+		contextWindow = effectiveContextWindow(providerContextWindow, autoCompactPolicy?.thresholdTokens);
+		contextPercent = effectiveContextPercent(
+			usage?.percent ?? null,
+			contextTokens,
+			providerContextWindow,
+			contextWindow,
+		);
 	}
 
 	function clearGitPoll() {
@@ -800,6 +832,7 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = ctx;
 		firstUserText = null;
 		refreshContext(ctx);
+		requestAutoCompactPolicy(ctx);
 
 		// Clear old widget-based HUDs, then replace Pi's multi-line footer with
 		// this single compact footer line. That removes the duplicated cwd/model,
@@ -905,6 +938,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => { install(ctx); });
 	pi.on("session_shutdown", async () => {
+		unregisterAutoCompactPolicy();
 		disposed = true;
 		clearGitPoll();
 		clearSubscriptionProbe();
@@ -927,10 +961,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", async (_event, ctx) => { refreshAndRender(ctx); });
 	pi.on("turn_end", async (_event, ctx) => { refreshAndRender(ctx); });
 	pi.on("thinking_level_select", async () => { requestChromeRender(); });
-	pi.on("model_select", async (event, ctx) => {
+	pi.on("model_select", async (_event, ctx) => {
 		currentCtx = ctx;
 		refreshContext(ctx);
-		contextWindow = event.model.contextWindow ?? contextWindow;
+		requestAutoCompactPolicy(ctx);
 		latestSubscriptionUsage = null;
 		lastSubscriptionProbeAt = 0;
 		void refreshSubscriptionUsage(ctx, true);
