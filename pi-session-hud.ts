@@ -24,6 +24,7 @@ import {
 	AUTO_COMPACT_POLICY_REQUEST_EVENT,
 	effectiveContextPercent,
 	effectiveContextWindow,
+	isContextWindowCapped,
 	parseAutoCompactPolicySnapshot,
 	sameModel,
 	type AutoCompactPolicySnapshot,
@@ -62,7 +63,7 @@ const CONTEXT_WARNING_LEVELS = {
 	red: CONTEXT_COLOR_REFERENCE_WINDOW * 0.60,
 };
 
-type ContextBand = "healthy" | "yellow" | "amber" | "red";
+export type ContextBand = "healthy" | "yellow" | "amber" | "red";
 type HudTheme = {
 	fg?: (color: ThemeColor, text: string) => string;
 };
@@ -103,7 +104,7 @@ function effectiveWarningLevels(contextWindow: number) {
 	};
 }
 
-function contextBand(percent: number | null, tokens: number | null, contextWindow: number): ContextBand {
+export function contextBand(percent: number | null, tokens: number | null, contextWindow: number): ContextBand {
 	if (percent === null) return "healthy";
 
 	const value = tokens !== null
@@ -582,6 +583,7 @@ export default function (pi: ExtensionAPI) {
 	let contextPercent: number | null = null;
 	let contextTokens: number | null = null;
 	let contextWindow = 0;
+	let providerContextWindow = 0;
 	let gitAdded = 0;
 	let gitRemoved = 0;
 	let gitDirty = false;
@@ -630,7 +632,7 @@ export default function (pi: ExtensionAPI) {
 		if (!firstUserText) firstUserText = extractFirstUserText(ctx);
 
 		const usage = ctx.getContextUsage();
-		const providerContextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+		providerContextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 		contextTokens = usage?.tokens ?? null;
 		contextWindow = effectiveContextWindow(providerContextWindow, autoCompactPolicy?.thresholdTokens);
 		contextPercent = effectiveContextPercent(
@@ -781,11 +783,12 @@ export default function (pi: ExtensionAPI) {
 		try {
 			refreshContext();
 
-			const band = contextBand(contextPercent, contextTokens, contextWindow);
+			const band = contextBand(contextPercent, contextTokens, providerContextWindow);
 			const color = contextColor(band);
 			const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
 			const tokUsed = contextTokens === null ? "?" : fmtTokens(contextTokens);
-			const tokWindow = fmtTokens(contextWindow);
+			const capIndicator = isContextWindowCapped(providerContextWindow, contextWindow) ? muted("↓", theme) : "";
+			const tokWindow = `${fmtTokens(contextWindow)}${capIndicator}`;
 			const contextFull = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}/${tokWindow}${RESET}`;
 			const contextCompact = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}${RESET}`;
 
