@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0] - 2026-07-15
+
+- Use the active `pi-auto-compact` threshold as the HUD context limit when it is lower than the provider context window.
+- Recalculate the displayed percentage and context colour against that effective limit.
+- Keep the provider context window when auto-compact is absent or its threshold is not the binding limit.
+- Add strict type checking and focused tests for context-limit integration.
+
 ## [0.3.2] - 2026-06-24
 
 - Move the usage metric into the input box bottom border.
