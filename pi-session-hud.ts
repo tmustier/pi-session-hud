@@ -17,9 +17,7 @@
  * Toggle: /hud (aliases: /status, /header)
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { CustomEditor, type ExtensionAPI, type ExtensionContext, getAgentDir, type KeybindingsManager, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI, type ExtensionContext, type KeybindingsManager, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { type EditorTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	AUTO_COMPACT_POLICY_EVENT,
@@ -46,7 +44,6 @@ const SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS = 5 * 60 * 1000;
 const SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS = 60 * 1000;
 const ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20";
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
-const FAST_MODE_CONFIG_PATH = join(getAgentDir(), "fast-mode.json");
 
 const RESET = "\x1b[0m";
 const FG_DIM = "\x1b[38;2;90;90;90m";
@@ -72,7 +69,6 @@ type HudTheme = {
 };
 type FooterData = {
 	getGitBranch?: () => string | null | undefined;
-	getExtensionStatuses?: () => ReadonlyMap<string, string>;
 };
 type SubscriptionUsage = {
 	usedPercent: number;
@@ -262,26 +258,10 @@ function stripAnsi(text: string): string {
 		.replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "");
 }
 
-export function isFastModeActiveStatus(status: string | undefined): boolean {
-	if (!status) return false;
-	return /(?:^|\s)fast(?:\s|$)/i.test(stripAnsi(status).trim());
-}
-
-export function parseFastModeEnabled(config: unknown): boolean {
-	return typeof config === "object" && config !== null && !Array.isArray(config)
-		&& (config as Record<string, unknown>).enabled === true;
-}
-
-export function shouldShowFastModeIndicator(statusActive: boolean, persistedEnabled: boolean): boolean {
-	return statusActive && persistedEnabled;
-}
-
-function readPersistedFastModeEnabled(): boolean {
-	try {
-		return parseFastModeEnabled(JSON.parse(readFileSync(FAST_MODE_CONFIG_PATH, "utf8")));
-	} catch {
-		return false;
-	}
+export function requestUsesFastMode(payload: unknown): boolean {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
+	const request = payload as Record<string, unknown>;
+	return request.service_tier === "priority" || request.speed === "fast";
 }
 
 export function formatModelLabel(modelId: string, thinking: string, fastModeActive: boolean): string {
@@ -633,9 +613,7 @@ export default function (pi: ExtensionAPI) {
 	let subscriptionProbeInFlight = false;
 	let disposed = false;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
-	let fastModeActive = false;
-	let fastModeStatusActive = false;
-	let persistedFastModeEnabled = false;
+	let lastRequestUsedFastMode = false;
 
 	function selectedModelIdentity(ctx: ExtensionContext | null): ModelIdentity | undefined {
 		const model = ctx?.model;
@@ -774,21 +752,13 @@ export default function (pi: ExtensionAPI) {
 	function currentModelLabel(): string {
 		const model = currentCtx?.model;
 		if (!model) return "";
-		return formatModelLabel(model.id, pi.getThinkingLevel(), fastModeActive);
+		return formatModelLabel(model.id, pi.getThinkingLevel(), lastRequestUsedFastMode);
 	}
 
-	function syncFastModeStatus(footerData?: FooterData) {
-		const statusActive = isFastModeActiveStatus(footerData?.getExtensionStatuses?.().get("fast-mode"));
-		if (statusActive !== fastModeStatusActive) {
-			fastModeStatusActive = statusActive;
-			persistedFastModeEnabled = statusActive ? readPersistedFastModeEnabled() : false;
-		}
-		const next = shouldShowFastModeIndicator(statusActive, persistedFastModeEnabled);
-		if (next === fastModeActive) return;
-		fastModeActive = next;
-		queueMicrotask(() => {
-			if (!disposed) editorTui?.requestRender();
-		});
+	function updateFastModeObservation(next: boolean) {
+		if (next === lastRequestUsedFastMode) return;
+		lastRequestUsedFastMode = next;
+		if (!disposed) editorTui?.requestRender();
 	}
 
 	function currentProviderLabel(): string {
@@ -831,7 +801,6 @@ export default function (pi: ExtensionAPI) {
 	): string[] {
 		if (disposed) return [""];
 		try {
-			syncFastModeStatus(footerData);
 			refreshContext();
 
 			const band = contextBand(contextPercent, contextTokens, providerContextWindow);
@@ -885,9 +854,7 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI || !enabled) return;
 		currentCtx = ctx;
 		firstUserText = null;
-		fastModeActive = false;
-		fastModeStatusActive = false;
-		persistedFastModeEnabled = readPersistedFastModeEnabled();
+		lastRequestUsedFastMode = false;
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 
@@ -1004,6 +971,10 @@ export default function (pi: ExtensionAPI) {
 		editorTui = null;
 	});
 	pi.on("agent_start", async (_event, ctx) => { refreshAndRender(ctx); });
+	pi.on("before_provider_request", (event, ctx) => {
+		currentCtx = ctx;
+		updateFastModeObservation(requestUsesFastMode(event.payload));
+	});
 	pi.on("agent_end", async (_event, ctx) => {
 		refreshAndRender(ctx);
 		void refreshGit(ctx);
@@ -1020,6 +991,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("thinking_level_select", async () => { requestChromeRender(); });
 	pi.on("model_select", async (_event, ctx) => {
 		currentCtx = ctx;
+		lastRequestUsedFastMode = false;
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 		latestSubscriptionUsage = null;

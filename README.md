@@ -25,7 +25,7 @@ The footer line, left to right:
 
 The editor border:
 
-- top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when [`pi-fast-mode`](https://github.com/RimuruW/pi-fast-mode) reports that fast mode is active for the selected model/API, the text-presentation lightning symbol `⚡︎` appears first: `⚡︎ • gpt-5.6-sol • medium`
+- top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when the latest provider request contains `service_tier: "priority"` or `speed: "fast"`, the text-presentation lightning symbol `⚡︎` appears first: `⚡︎ • gpt-5.6-sol • medium`
 - bottom right: `44% left` weekly subscription quota, or session cost (`$0.042`) when using API-key billing
 - one-column input gutter with word wrapping inside a full rounded border; scroll indicators (`↑ 3 more`) stay visible in the border
 
@@ -78,7 +78,8 @@ How to read the numbers:
 - if auto-compact is absent, does not answer the policy request, or has a threshold at or above the model context window, the HUD keeps Pi's provider context window
 - `?` in the context slot means Pi has no fresh usage data yet, for example right after compaction
 - named sessions render white; the unnamed fallback (first words of your first message) renders muted grey
-- when `pi-fast-mode` is loaded, the HUD requires both its active status and its persisted enabled setting before showing `⚡︎`; the glyph stays hidden when fast mode is off or unavailable for the selected model/API
+- `⚡︎` means the latest provider request for the current session and model requested a fast tier; the HUD passively observes serialized request payloads and never enables or modifies fast mode
+- Pi runs request hooks in extension load order, so the HUD must load after any extension that adds `service_tier: "priority"` or `speed: "fast"`; the indicator updates on the next provider request and clears on session or model changes
 - `44% left` is your weekly subscription quota remaining; it appears when Pi is authenticated via OpenAI Codex or Anthropic subscription OAuth
 - quota comes from provider rate-limit headers on each response, plus a background probe of the provider usage endpoint every 5 minutes; if neither is available the metric simply stays absent
 - on API-key billing the bottom border shows Pi's calculated session cost instead
