@@ -2,7 +2,7 @@
  * Pi Session HUD — a compact context footer plus Amp-style editor chrome.
  *
  * Shows:
- *   ╭──────────────────────────────────────── gpt-5.5 • xhigh ╮
+ *   ╭───────────────────────────── ⚡︎ • gpt-5.6-sol • medium ╮
  *   │ prompt text wraps inside a one-column gutter              │
  *   ╰────────────────────────────────────────────── 44% left ╯
  *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     openai-codex weekly reset in 3d04h
@@ -66,6 +66,10 @@ const CONTEXT_WARNING_LEVELS = {
 export type ContextBand = "healthy" | "yellow" | "amber" | "red";
 type HudTheme = {
 	fg?: (color: ThemeColor, text: string) => string;
+};
+type FooterData = {
+	getGitBranch?: () => string | null | undefined;
+	getExtensionStatuses?: () => ReadonlyMap<string, string>;
 };
 type SubscriptionUsage = {
 	usedPercent: number;
@@ -253,6 +257,16 @@ function stripAnsi(text: string): string {
 		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
 		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
 		.replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "");
+}
+
+export function isFastModeActiveStatus(status: string | undefined): boolean {
+	if (!status) return false;
+	return /(?:^|\s)fast(?:\s|$)/i.test(stripAnsi(status).trim());
+}
+
+export function formatModelLabel(modelId: string, thinking: string, fastModeActive: boolean): string {
+	const modelAndThinking = thinking !== "off" ? `${modelId} • ${thinking}` : modelId;
+	return fastModeActive ? `⚡︎ • ${modelAndThinking}` : modelAndThinking;
 }
 
 function isEditorBorderLine(line: string): boolean {
@@ -599,6 +613,7 @@ export default function (pi: ExtensionAPI) {
 	let subscriptionProbeInFlight = false;
 	let disposed = false;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
+	let fastModeActive = false;
 
 	function selectedModelIdentity(ctx: ExtensionContext | null): ModelIdentity | undefined {
 		const model = ctx?.model;
@@ -737,8 +752,16 @@ export default function (pi: ExtensionAPI) {
 	function currentModelLabel(): string {
 		const model = currentCtx?.model;
 		if (!model) return "";
-		const thinking = pi.getThinkingLevel();
-		return thinking !== "off" ? `${model.id} • ${thinking}` : model.id;
+		return formatModelLabel(model.id, pi.getThinkingLevel(), fastModeActive);
+	}
+
+	function syncFastModeStatus(footerData?: FooterData) {
+		const next = isFastModeActiveStatus(footerData?.getExtensionStatuses?.().get("fast-mode"));
+		if (next === fastModeActive) return;
+		fastModeActive = next;
+		queueMicrotask(() => {
+			if (!disposed) editorTui?.requestRender();
+		});
 	}
 
 	function currentProviderLabel(): string {
@@ -776,11 +799,12 @@ export default function (pi: ExtensionAPI) {
 
 	function renderFooter(
 		width: number,
-		footerData?: { getGitBranch?: () => string | null | undefined },
+		footerData?: FooterData,
 		theme?: HudTheme,
 	): string[] {
 		if (disposed) return [""];
 		try {
+			syncFastModeStatus(footerData);
 			refreshContext();
 
 			const band = contextBand(contextPercent, contextTokens, providerContextWindow);
@@ -834,6 +858,7 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI || !enabled) return;
 		currentCtx = ctx;
 		firstUserText = null;
+		fastModeActive = false;
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 

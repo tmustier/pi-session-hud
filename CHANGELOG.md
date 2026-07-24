@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Show the text-presentation lightning symbol `⚡︎` before the model alias when `pi-fast-mode` reports that fast mode is active for the selected model/API.
+- Keep the indicator hidden when fast mode is off or unsupported.
+
 ## [0.4.1] - 2026-07-16
 
 - Keep the established fixed token colour bands when auto-compact lowers the displayed context window.
