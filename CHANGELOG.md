@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-- Show the text-presentation lightning symbol `⚡︎` before the model alias when `pi-fast-mode` reports that fast mode is active for the selected model/API.
-- Keep the indicator hidden when fast mode is off or unsupported.
-- Require `pi-fast-mode`'s persisted enabled setting as well as its active UI status, preventing a stale status from showing the indicator after starting or switching sessions.
+- Show the text-presentation lightning symbol `⚡︎` when the latest serialized provider request contains `service_tier: "priority"` or `speed: "fast"`.
+- Observe fast-tier requests passively without depending on, configuring, or changing a fast-mode extension.
+- Clear the last-request observation when the session or selected model changes.
 
 ## [0.4.1] - 2026-07-16
 
