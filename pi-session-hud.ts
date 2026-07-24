@@ -17,7 +17,9 @@
  * Toggle: /hud (aliases: /status, /header)
  */
 
-import { CustomEditor, type ExtensionAPI, type ExtensionContext, type KeybindingsManager, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { CustomEditor, type ExtensionAPI, type ExtensionContext, getAgentDir, type KeybindingsManager, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { type EditorTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	AUTO_COMPACT_POLICY_EVENT,
@@ -44,6 +46,7 @@ const SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS = 5 * 60 * 1000;
 const SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS = 60 * 1000;
 const ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20";
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
+const FAST_MODE_CONFIG_PATH = join(getAgentDir(), "fast-mode.json");
 
 const RESET = "\x1b[0m";
 const FG_DIM = "\x1b[38;2;90;90;90m";
@@ -262,6 +265,23 @@ function stripAnsi(text: string): string {
 export function isFastModeActiveStatus(status: string | undefined): boolean {
 	if (!status) return false;
 	return /(?:^|\s)fast(?:\s|$)/i.test(stripAnsi(status).trim());
+}
+
+export function parseFastModeEnabled(config: unknown): boolean {
+	return typeof config === "object" && config !== null && !Array.isArray(config)
+		&& (config as Record<string, unknown>).enabled === true;
+}
+
+export function shouldShowFastModeIndicator(statusActive: boolean, persistedEnabled: boolean): boolean {
+	return statusActive && persistedEnabled;
+}
+
+function readPersistedFastModeEnabled(): boolean {
+	try {
+		return parseFastModeEnabled(JSON.parse(readFileSync(FAST_MODE_CONFIG_PATH, "utf8")));
+	} catch {
+		return false;
+	}
 }
 
 export function formatModelLabel(modelId: string, thinking: string, fastModeActive: boolean): string {
@@ -614,6 +634,8 @@ export default function (pi: ExtensionAPI) {
 	let disposed = false;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
 	let fastModeActive = false;
+	let fastModeStatusActive = false;
+	let persistedFastModeEnabled = false;
 
 	function selectedModelIdentity(ctx: ExtensionContext | null): ModelIdentity | undefined {
 		const model = ctx?.model;
@@ -756,7 +778,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function syncFastModeStatus(footerData?: FooterData) {
-		const next = isFastModeActiveStatus(footerData?.getExtensionStatuses?.().get("fast-mode"));
+		const statusActive = isFastModeActiveStatus(footerData?.getExtensionStatuses?.().get("fast-mode"));
+		if (statusActive !== fastModeStatusActive) {
+			fastModeStatusActive = statusActive;
+			persistedFastModeEnabled = statusActive ? readPersistedFastModeEnabled() : false;
+		}
+		const next = shouldShowFastModeIndicator(statusActive, persistedFastModeEnabled);
 		if (next === fastModeActive) return;
 		fastModeActive = next;
 		queueMicrotask(() => {
@@ -859,6 +886,8 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = ctx;
 		firstUserText = null;
 		fastModeActive = false;
+		fastModeStatusActive = false;
+		persistedFastModeEnabled = readPersistedFastModeEnabled();
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 

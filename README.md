@@ -78,7 +78,7 @@ How to read the numbers:
 - if auto-compact is absent, does not answer the policy request, or has a threshold at or above the model context window, the HUD keeps Pi's provider context window
 - `?` in the context slot means Pi has no fresh usage data yet, for example right after compaction
 - named sessions render white; the unnamed fallback (first words of your first message) renders muted grey
-- when `pi-fast-mode` is loaded, its active status is mirrored into the editor border as `⚡︎`; the glyph stays hidden when fast mode is off or unavailable for the selected model/API
+- when `pi-fast-mode` is loaded, the HUD requires both its active status and its persisted enabled setting before showing `⚡︎`; the glyph stays hidden when fast mode is off or unavailable for the selected model/API
 - `44% left` is your weekly subscription quota remaining; it appears when Pi is authenticated via OpenAI Codex or Anthropic subscription OAuth
 - quota comes from provider rate-limit headers on each response, plus a background probe of the provider usage endpoint every 5 minutes; if neither is available the metric simply stays absent
 - on API-key billing the bottom border shows Pi's calculated session cost instead

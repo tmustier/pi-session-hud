@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatModelLabel, isFastModeActiveStatus } from "../pi-session-hud.js";
+import {
+	formatModelLabel,
+	isFastModeActiveStatus,
+	parseFastModeEnabled,
+	shouldShowFastModeIndicator,
+} from "../pi-session-hud.js";
 
 test("adds a text lightning glyph before the model while fast mode is active", () => {
 	assert.equal(formatModelLabel("gpt-5.6-sol", "medium", true), "⚡︎ • gpt-5.6-sol • medium");
@@ -16,4 +21,17 @@ test("recognizes only pi-fast-mode's active status", () => {
 	assert.equal(isFastModeActiveStatus("\u001b[38;5;4m⚡\u001b[0m\u001b[2m fast\u001b[0m"), true);
 	assert.equal(isFastModeActiveStatus("⚡ n/a"), false);
 	assert.equal(isFastModeActiveStatus(undefined), false);
+});
+
+test("requires fast mode to be explicitly enabled in persisted config", () => {
+	assert.equal(parseFastModeEnabled({ enabled: true }), true);
+	assert.equal(parseFastModeEnabled({ enabled: false }), false);
+	assert.equal(parseFastModeEnabled({}), false);
+	assert.equal(parseFastModeEnabled(null), false);
+});
+
+test("does not show the indicator for a stale active status when persisted mode is off", () => {
+	assert.equal(shouldShowFastModeIndicator(true, false), false);
+	assert.equal(shouldShowFastModeIndicator(true, true), true);
+	assert.equal(shouldShowFastModeIndicator(false, true), false);
 });
