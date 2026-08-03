@@ -2,7 +2,7 @@
  * Pi Session HUD — a compact context footer plus Amp-style editor chrome.
  *
  * Shows:
- *   ╭───────────────────────────── ⚡︎ • gpt-5.6-sol • medium ╮
+ *   ╭───────────────────────────── ↯ • gpt-5.6-sol • medium ╮
  *   │ prompt text wraps inside a one-column gutter              │
  *   ╰────────────────────────────────────────────── 44% left ╯
  *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     openai-codex weekly reset in 3d04h
@@ -266,7 +266,8 @@ export function requestUsesFastMode(payload: unknown): boolean {
 
 export function formatModelLabel(modelId: string, thinking: string, fastModeActive: boolean): string {
 	const modelAndThinking = thinking !== "off" ? `${modelId} • ${thinking}` : modelId;
-	return fastModeActive ? `⚡︎ • ${modelAndThinking}` : modelAndThinking;
+	// Use a single-column text glyph so the TUI and terminal agree on border width.
+	return fastModeActive ? `↯ • ${modelAndThinking}` : modelAndThinking;
 }
 
 function isEditorBorderLine(line: string): boolean {
