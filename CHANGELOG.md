@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Show the text-presentation lightning symbol `⚡︎` when the latest serialized provider request contains `service_tier: "priority"` or `speed: "fast"`.
+- Show the single-column lightning symbol `↯` when the latest serialized provider request contains `service_tier: "priority"` or `speed: "fast"`.
+- Keep the input border connected in narrow terminals by avoiding ambiguous-width variation sequences in the fast-mode label.
 - Observe fast-tier requests passively without depending on, configuring, or changing a fast-mode extension.
 - Clear the last-request observation when the session or selected model changes.
 

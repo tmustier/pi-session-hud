@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { formatModelLabel, requestUsesFastMode } from "../pi-session-hud.js";
 
-test("adds a text lightning glyph before the model while fast mode is active", () => {
-	assert.equal(formatModelLabel("gpt-5.6-sol", "medium", true), "⚡︎ • gpt-5.6-sol • medium");
-	assert.equal(formatModelLabel("gpt-5.6-sol", "off", true), "⚡︎ • gpt-5.6-sol");
+test("adds a single-column text lightning glyph before the model while fast mode is active", () => {
+	const label = formatModelLabel("gpt-5.6-sol", "medium", true);
+	assert.equal(label, "↯ • gpt-5.6-sol • medium");
+	assert.equal(formatModelLabel("gpt-5.6-sol", "off", true), "↯ • gpt-5.6-sol");
+	assert.equal(visibleWidth(label), [...label].length);
 });
 
 test("keeps the existing model label while fast mode is inactive", () => {
