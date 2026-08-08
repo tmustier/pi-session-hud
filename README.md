@@ -25,7 +25,7 @@ The footer line, left to right:
 
 The editor border:
 
-- top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when the latest provider request contains `service_tier: "priority"` or `speed: "fast"`, the single-column lightning symbol `↯` appears first: `↯ • gpt-5.6-sol • medium`
+- top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when fast mode is active, the single-column lightning symbol `↯` appears first
 - bottom right: `44% left` weekly subscription quota, or session cost (`$0.042`) when using API-key billing
 - one-column input gutter with word wrapping inside a full rounded border; scroll indicators (`↑ 3 more`) stay visible in the border
 
