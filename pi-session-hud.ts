@@ -33,6 +33,7 @@ import {
 
 const WIDGET_ID = "pi-session-hud";
 const LEGACY_WIDGET_ID = "pi-status-bar";
+const FAST_MODE_STATUS_KEY = "fast-mode";
 const CONTEXT_BAR_WIDTH = 6;
 const SESSION_FALLBACK_WORDS = 8;
 const EDITOR_GUTTER_WIDTH = 1;
@@ -69,6 +70,7 @@ type HudTheme = {
 };
 type FooterData = {
 	getGitBranch?: () => string | null | undefined;
+	getExtensionStatuses?: () => ReadonlyMap<string, string>;
 };
 type SubscriptionUsage = {
 	usedPercent: number;
@@ -256,6 +258,12 @@ function stripAnsi(text: string): string {
 		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
 		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
 		.replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "");
+}
+
+export function fastModeFromExtensionStatuses(statuses: ReadonlyMap<string, string>): boolean | null {
+	const status = statuses.get(FAST_MODE_STATUS_KEY);
+	if (status === undefined) return null;
+	return stripAnsi(status).trim().toLowerCase() === "⚡ fast";
 }
 
 export function requestUsesFastMode(payload: unknown): boolean {
@@ -615,6 +623,7 @@ export default function (pi: ExtensionAPI) {
 	let disposed = false;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
 	let lastRequestUsedFastMode = false;
+	let extensionFastModeActive: boolean | null = null;
 
 	function selectedModelIdentity(ctx: ExtensionContext | null): ModelIdentity | undefined {
 		const model = ctx?.model;
@@ -753,7 +762,22 @@ export default function (pi: ExtensionAPI) {
 	function currentModelLabel(): string {
 		const model = currentCtx?.model;
 		if (!model) return "";
-		return formatModelLabel(model.id, pi.getThinkingLevel(), lastRequestUsedFastMode);
+		const fastModeActive = extensionFastModeActive ?? lastRequestUsedFastMode;
+		return formatModelLabel(model.id, pi.getThinkingLevel(), fastModeActive);
+	}
+
+	function syncExtensionStatuses(footerData?: FooterData): string[] {
+		const statuses = footerData?.getExtensionStatuses?.() ?? new Map<string, string>();
+		const observedFastMode = fastModeFromExtensionStatuses(statuses);
+		const nextFastMode = observedFastMode ?? (extensionFastModeActive === null ? null : false);
+		if (nextFastMode !== extensionFastModeActive) {
+			extensionFastModeActive = nextFastMode;
+			editorTui?.requestRender();
+		}
+
+		return [...statuses.entries()]
+			.filter(([key, value]) => value && (key !== FAST_MODE_STATUS_KEY || observedFastMode !== true))
+			.map(([, value]) => normalizeText(value));
 	}
 
 	function updateFastModeObservation(next: boolean) {
@@ -790,6 +814,10 @@ export default function (pi: ExtensionAPI) {
 		return formatProviderDetailCompact(currentSubscriptionUsage(), theme);
 	}
 
+	function joinFooterDetails(parts: string[], theme?: HudTheme): string {
+		return parts.filter(Boolean).join(` ${muted("•", theme)} `);
+	}
+
 	function requestChromeRender() {
 		footerTui?.requestRender();
 		editorTui?.requestRender();
@@ -803,6 +831,7 @@ export default function (pi: ExtensionAPI) {
 		if (disposed) return [""];
 		try {
 			refreshContext();
+			const extensionStatuses = syncExtensionStatuses(footerData);
 
 			const band = contextBand(contextPercent, contextTokens, providerContextWindow);
 			const color = contextColor(band);
@@ -829,8 +858,8 @@ export default function (pi: ExtensionAPI) {
 			const compactLeftBase = `${gutter}${contextCompact} ${divider} ${location}`;
 			const fullLeft = sessionLabel ? `${fullLeftBase} ${sessionDivider} ${sessionLabel}` : fullLeftBase;
 			const compactLeft = sessionLabel ? `${compactLeftBase} ${sessionDivider} ${sessionLabel}` : compactLeftBase;
-			const rightFull = footerProviderDetail(theme);
-			const rightCompact = footerProviderDetailCompact(theme);
+			const rightFull = joinFooterDetails([...extensionStatuses, footerProviderDetail(theme)], theme);
+			const rightCompact = joinFooterDetails([...extensionStatuses, footerProviderDetailCompact(theme)], theme);
 
 			if (fitsLeftRight(fullLeft, rightFull, width)) return [fitLeftRight(fullLeft, rightFull, width)];
 			if (fitsLeftRight(compactLeft, rightCompact, width)) return [fitLeftRight(compactLeft, rightCompact, width)];
@@ -856,6 +885,7 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = ctx;
 		firstUserText = null;
 		lastRequestUsedFastMode = false;
+		extensionFastModeActive = null;
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 

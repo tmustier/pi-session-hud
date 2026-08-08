@@ -21,7 +21,7 @@ The footer line, left to right:
 - current working directory and git branch
 - git diff stats (`+x -y`, or `~` for dirty-without-line-count changes)
 - session name, or the first few words of the first user message when unnamed
-- right edge: provider detail, for example `openai-codex weekly reset in 3d04h`, or just the provider name on API-key billing
+- right edge: active extension statuses followed by provider detail, for example `openai-codex weekly reset in 3d04h`, or just the provider name on API-key billing; an active `fast-mode` status is promoted to the editor-border lightning symbol instead of duplicated here
 
 The editor border:
 
@@ -78,8 +78,8 @@ How to read the numbers:
 - if auto-compact is absent, does not answer the policy request, or has a threshold at or above the model context window, the HUD keeps Pi's provider context window
 - `?` in the context slot means Pi has no fresh usage data yet, for example right after compaction
 - named sessions render white; the unnamed fallback (first words of your first message) renders muted grey
-- `↯` means the latest provider request for the current session and model requested a fast tier; the HUD passively observes serialized request payloads and never enables or modifies fast mode
-- Pi runs request hooks in extension load order, so the HUD must load after any extension that adds `service_tier: "priority"` or `speed: "fast"`; the indicator updates on the next provider request and clears on session or model changes
+- `↯` means fast mode is active: the HUD reads Pi's standard `fast-mode` extension status immediately and also passively observes serialized requests containing `service_tier: "priority"` or `speed: "fast"` as a fallback; it never enables or modifies fast mode
+- the standard extension-status path is independent of package and request-hook order; payload-only integrations update the indicator on the next provider request and still need their payload patch to run before the HUD's observation hook
 - `44% left` is your weekly subscription quota remaining; it appears when Pi is authenticated via OpenAI Codex or Anthropic subscription OAuth
 - quota comes from provider rate-limit headers on each response, plus a background probe of the provider usage endpoint every 5 minutes; if neither is available the metric simply stays absent
 - on API-key billing the bottom border shows Pi's calculated session cost instead

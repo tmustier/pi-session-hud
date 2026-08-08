@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { formatModelLabel, requestUsesFastMode } from "../pi-session-hud.js";
+import { fastModeFromExtensionStatuses, formatModelLabel, requestUsesFastMode } from "../pi-session-hud.js";
 
 test("adds a single-column text lightning glyph before the model while fast mode is active", () => {
 	const label = formatModelLabel("gpt-5.6-sol", "medium", true);
@@ -12,6 +12,13 @@ test("adds a single-column text lightning glyph before the model while fast mode
 
 test("keeps the existing model label while fast mode is inactive", () => {
 	assert.equal(formatModelLabel("gpt-5.6-sol", "medium", false), "gpt-5.6-sol • medium");
+});
+
+test("recognizes fast mode from extension status without depending on request-hook order", () => {
+	assert.equal(fastModeFromExtensionStatuses(new Map([["fast-mode", "⚡ fast"]])), true);
+	assert.equal(fastModeFromExtensionStatuses(new Map([["fast-mode", "\x1b[33m⚡\x1b[0m\x1b[2m fast\x1b[0m"]])), true);
+	assert.equal(fastModeFromExtensionStatuses(new Map([["fast-mode", "⚡ n/a"]])), false);
+	assert.equal(fastModeFromExtensionStatuses(new Map()), null);
 });
 
 test("recognizes fast mode from the serialized provider request", () => {

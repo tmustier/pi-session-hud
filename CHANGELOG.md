@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Read Pi's standard `fast-mode` extension status so the input-border lightning indicator updates immediately and no longer depends on package or request-hook order.
+- Preserve other extensions' status text in the compact footer instead of discarding it when replacing Pi's stock footer.
+- Keep serialized provider-request inspection as a fallback for fast-tier integrations that do not publish a status.
+
 ## [0.5.0] - 2026-08-08
 
 - Show the single-column lightning symbol `↯` when the latest serialized provider request contains `service_tier: "priority"` or `speed: "fast"`.
