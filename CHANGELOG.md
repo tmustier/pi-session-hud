@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.5.1] - 2026-08-08
 
 - Read Pi's standard `fast-mode` extension status so the input-border lightning indicator updates immediately and no longer depends on package or request-hook order.
 - Preserve other extensions' status text in the compact footer instead of discarding it when replacing Pi's stock footer.
