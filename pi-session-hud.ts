@@ -1,24 +1,13 @@
-/**
- * Pi Session HUD — a compact context footer plus Amp-style editor chrome.
- *
- * Shows:
- *   ╭───────────────────────────── ↯ • gpt-5.6-sol • medium ╮
- *   │ prompt text wraps inside a one-column gutter              │
- *   ╰────────────────────────────────────────────── 44% left ╯
- *    ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     openai-codex weekly reset in 3d04h
- *
- * Minimal footer output: context usage, cwd/branch, git diff stats, session,
- * and provider/reset detail. The editor border carries model/thinking at the top
- * and the current usage metric at the bottom.
- *
- * Install:
- *   - pi install npm:@tmustier/pi-session-hud
- *   - or copy/symlink pi-session-hud.ts into ~/.pi/agent/extensions/
- * Toggle: /hud (aliases: /status, /header)
- */
+/** Compact context footer and editor chrome for Pi. */
 
-import { CustomEditor, type ExtensionAPI, type ExtensionContext, type KeybindingsManager, type ThemeColor } from "@earendil-works/pi-coding-agent";
-import { type EditorTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	CustomEditor,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type ReadonlyFooterDataProvider,
+	type ThemeColor,
+} from "@earendil-works/pi-coding-agent";
+import { type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	AUTO_COMPACT_POLICY_EVENT,
 	AUTO_COMPACT_POLICY_REQUEST_EVENT,
@@ -31,8 +20,6 @@ import {
 	type ModelIdentity,
 } from "./auto-compact-limit.js";
 
-const WIDGET_ID = "pi-session-hud";
-const LEGACY_WIDGET_ID = "pi-status-bar";
 const FAST_MODE_STATUS_KEY = "fast-mode";
 const CONTEXT_BAR_WIDTH = 6;
 const SESSION_FALLBACK_WORDS = 8;
@@ -68,9 +55,11 @@ export type ContextBand = "healthy" | "yellow" | "amber" | "red";
 type HudTheme = {
 	fg?: (color: ThemeColor, text: string) => string;
 };
-type FooterData = {
-	getGitBranch?: () => string | null | undefined;
-	getExtensionStatuses?: () => ReadonlyMap<string, string>;
+type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
+type InstalledEditor = {
+	factory: EditorFactory;
+	previousFactory: EditorFactory | undefined;
+	disable: () => void;
 };
 type SubscriptionUsage = {
 	usedPercent: number;
@@ -283,11 +272,11 @@ function isEditorBorderLine(line: string): boolean {
 	return plain.includes("─") && /^[─ ↑↓0-9more]+$/.test(plain);
 }
 
-function findBottomBorderIndex(lines: string[]): number {
+function findBottomBorderIndex(lines: string[]): number | undefined {
 	for (let i = lines.length - 1; i > 0; i--) {
 		if (isEditorBorderLine(lines[i] ?? "")) return i;
 	}
-	return lines.length - 1;
+	return undefined;
 }
 
 function scrollIndicator(line: string): string {
@@ -314,10 +303,6 @@ function muted(text: string, theme?: HudTheme): string {
 
 function textColor(text: string, theme?: HudTheme): string {
 	return theme?.fg ? theme.fg("text", text) : `${FG_TEXT}${text}${RESET}`;
-}
-
-function styleSessionLabel(label: string, isFallback: boolean, theme?: HudTheme): string {
-	return isFallback ? muted(label, theme) : textColor(label, theme);
 }
 
 function numberFrom(value: unknown): number | undefined {
@@ -612,11 +597,11 @@ export default function (pi: ExtensionAPI) {
 	let gitDirty = false;
 	let gitPollTimer: ReturnType<typeof setInterval> | null = null;
 	let subscriptionProbeTimer: ReturnType<typeof setInterval> | null = null;
-	let editorInstallTimer: ReturnType<typeof setTimeout> | null = null;
 	let currentCtx: ExtensionContext | null = null;
 	let firstUserText: string | null = null;
 	let footerTui: TUI | null = null;
 	let editorTui: TUI | null = null;
+	let installedEditor: InstalledEditor | null = null;
 	let latestSubscriptionUsage: SubscriptionUsage | null = null;
 	let lastSubscriptionProbeAt = 0;
 	let subscriptionProbeInFlight = false;
@@ -680,17 +665,6 @@ export default function (pi: ExtensionAPI) {
 		subscriptionProbeTimer = null;
 	}
 
-	function clearEditorInstallTimer() {
-		if (!editorInstallTimer) return;
-		clearTimeout(editorInstallTimer);
-		editorInstallTimer = null;
-	}
-
-	function providerSupportsSubscriptionUsage(ctx: ExtensionContext | null): boolean {
-		const provider = ctx?.model?.provider;
-		return Boolean(provider && SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS.has(provider));
-	}
-
 	function updateSubscriptionUsage(usage: SubscriptionUsage | null | undefined) {
 		if (!usage) return;
 		latestSubscriptionUsage = usage;
@@ -698,7 +672,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function refreshSubscriptionUsage(ctx: ExtensionContext | null = currentCtx, force = false) {
-		if (!ctx || disposed || !providerSupportsSubscriptionUsage(ctx) || !isUsingSubscriptionAuth(ctx)) return;
+		if (
+			!ctx ||
+			disposed ||
+			!SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS.has(ctx.model?.provider ?? "") ||
+			!isUsingSubscriptionAuth(ctx)
+		) return;
 		if (subscriptionProbeInFlight) return;
 		if (!force && Date.now() - lastSubscriptionProbeAt < SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS) return;
 
@@ -766,14 +745,13 @@ export default function (pi: ExtensionAPI) {
 		return formatModelLabel(model.id, pi.getThinkingLevel(), fastModeActive);
 	}
 
-	function syncExtensionStatuses(footerData?: FooterData): string[] {
-		const statuses = footerData?.getExtensionStatuses?.() ?? new Map<string, string>();
+	function syncExtensionStatuses(footerData: ReadonlyFooterDataProvider): string[] {
+		const statuses = footerData.getExtensionStatuses();
 		const observedFastMode = fastModeFromExtensionStatuses(statuses);
-		const nextFastMode = observedFastMode ?? (extensionFastModeActive === null ? null : false);
-		if (nextFastMode !== extensionFastModeActive) {
-			extensionFastModeActive = nextFastMode;
-			editorTui?.requestRender();
-		}
+		const previousFastMode = extensionFastModeActive;
+		if (observedFastMode !== null) extensionFastModeActive = observedFastMode;
+		else if (extensionFastModeActive !== null) extensionFastModeActive = false;
+		if (extensionFastModeActive !== previousFastMode) editorTui?.requestRender();
 
 		return [...statuses.entries()]
 			.filter(([key, value]) => value && (key !== FAST_MODE_STATUS_KEY || observedFastMode !== true))
@@ -784,10 +762,6 @@ export default function (pi: ExtensionAPI) {
 		if (next === lastRequestUsedFastMode) return;
 		lastRequestUsedFastMode = next;
 		if (!disposed) editorTui?.requestRender();
-	}
-
-	function currentProviderLabel(): string {
-		return currentCtx?.model?.provider ?? "";
 	}
 
 	function currentSubscriptionUsage(): SubscriptionUsage | null {
@@ -806,14 +780,6 @@ export default function (pi: ExtensionAPI) {
 		return "";
 	}
 
-	function footerProviderDetail(theme?: HudTheme): string {
-		return formatProviderDetail(currentProviderLabel(), currentSubscriptionUsage(), theme);
-	}
-
-	function footerProviderDetailCompact(theme?: HudTheme): string {
-		return formatProviderDetailCompact(currentSubscriptionUsage(), theme);
-	}
-
 	function joinFooterDetails(parts: string[], theme?: HudTheme): string {
 		return parts.filter(Boolean).join(` ${muted("•", theme)} `);
 	}
@@ -825,7 +791,7 @@ export default function (pi: ExtensionAPI) {
 
 	function renderFooter(
 		width: number,
-		footerData?: FooterData,
+		footerData: ReadonlyFooterDataProvider,
 		theme?: HudTheme,
 	): string[] {
 		if (disposed) return [""];
@@ -843,14 +809,16 @@ export default function (pi: ExtensionAPI) {
 			const contextCompact = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}${RESET}`;
 
 			const cwd = currentCtx?.cwd ?? process.cwd();
-			const branch = footerData?.getGitBranch?.();
+			const branch = footerData.getGitBranch();
 			const diffStats = formatDiffStats(gitAdded, gitRemoved, gitDirty);
 			const location = `${displayPath(cwd)}${branch ? ` (${branch})` : ""}${diffStats}`;
 			const locationCompact = branch ? `(${branch})${diffStats}` : (diffStats.trim() || displayPath(cwd));
 			const sessionName = normalizeText(pi.getSessionName() ?? "");
 			const isFallbackSessionLabel = !sessionName && Boolean(firstUserText);
 			const sessionLabelRaw = sessionName || (firstUserText ? firstWords(firstUserText) : "");
-			const sessionLabel = sessionLabelRaw ? styleSessionLabel(sessionLabelRaw, isFallbackSessionLabel, theme) : "";
+			const sessionLabel = sessionLabelRaw
+				? isFallbackSessionLabel ? muted(sessionLabelRaw, theme) : textColor(sessionLabelRaw, theme)
+				: "";
 			const divider = muted("│", theme);
 			const sessionDivider = muted("|", theme);
 			const gutter = " ".repeat(FOOTER_GUTTER_WIDTH);
@@ -858,8 +826,15 @@ export default function (pi: ExtensionAPI) {
 			const compactLeftBase = `${gutter}${contextCompact} ${divider} ${location}`;
 			const fullLeft = sessionLabel ? `${fullLeftBase} ${sessionDivider} ${sessionLabel}` : fullLeftBase;
 			const compactLeft = sessionLabel ? `${compactLeftBase} ${sessionDivider} ${sessionLabel}` : compactLeftBase;
-			const rightFull = joinFooterDetails([...extensionStatuses, footerProviderDetail(theme)], theme);
-			const rightCompact = joinFooterDetails([...extensionStatuses, footerProviderDetailCompact(theme)], theme);
+			const subscriptionUsage = currentSubscriptionUsage();
+			const rightFull = joinFooterDetails([
+				...extensionStatuses,
+				formatProviderDetail(currentCtx?.model?.provider ?? "", subscriptionUsage, theme),
+			], theme);
+			const rightCompact = joinFooterDetails([
+				...extensionStatuses,
+				formatProviderDetailCompact(subscriptionUsage, theme),
+			], theme);
 
 			if (fitsLeftRight(fullLeft, rightFull, width)) return [fitLeftRight(fullLeft, rightFull, width)];
 			if (fitsLeftRight(compactLeft, rightCompact, width)) return [fitLeftRight(compactLeft, rightCompact, width)];
@@ -889,17 +864,12 @@ export default function (pi: ExtensionAPI) {
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 
-		// Clear old widget-based HUDs, then replace Pi's multi-line footer with
-		// this single compact footer line. That removes the duplicated cwd/model,
-		// compaction, and MCP status rows from the area below the input box.
-		ctx.ui.setWidget(WIDGET_ID, undefined);
-		ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
 		disposed = false;
 		startGitPoll(ctx);
 		startSubscriptionProbe(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			footerTui = tui;
-			const unsubscribeBranch = footerData?.onBranchChange?.(() => tui.requestRender());
+			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
 			return {
 				render: (width: number) => renderFooter(width, footerData, theme),
 				invalidate() {},
@@ -908,81 +878,73 @@ export default function (pi: ExtensionAPI) {
 					footerTui = null;
 					clearGitPoll();
 					clearSubscriptionProbe();
-					clearEditorInstallTimer();
-					if (typeof unsubscribeBranch === "function") unsubscribeBranch();
+					unsubscribeBranch();
 				},
 			};
 		});
 
-		class HudEditor extends CustomEditor {
-			constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
-				super(tui, theme, keybindings, { paddingX: EDITOR_GUTTER_WIDTH });
-				editorTui = tui;
+		const previousFactory = ctx.ui.getEditorComponent();
+		let editorActive = true;
+		const editorFactory: EditorFactory = (tui, theme, keybindings) => {
+			editorTui = tui;
+			const hudTheme = ctx.ui.theme;
+			const editor = previousFactory?.(tui, theme, keybindings)
+				?? new CustomEditor(tui, theme, keybindings, { paddingX: EDITOR_GUTTER_WIDTH });
+			const renderEditor = editor.render.bind(editor);
+			const setPaddingX = editor.setPaddingX?.bind(editor);
+			if (setPaddingX) {
+				editor.setPaddingX = (padding) => setPaddingX(Math.max(EDITOR_GUTTER_WIDTH, padding));
+				editor.setPaddingX(EDITOR_GUTTER_WIDTH);
 			}
 
-			setPaddingX(padding: number): void {
-				super.setPaddingX(Math.max(EDITOR_GUTTER_WIDTH, padding));
-			}
-
-			render(width: number): string[] {
-				if (width < 4) return super.render(width);
+			editor.render = (width: number): string[] => {
+				if (!editorActive || width < 4) return renderEditor(width);
 
 				try {
 					const innerWidth = Math.max(1, width - 2);
-					const lines = super.render(innerWidth);
-					if (lines.length < 2) return lines.map((line) => fitLine(line, width));
-
-					const theme = ctx.ui.theme;
-					const border = (text: string) => this.borderColor(text);
-					const bottomIndex = findBottomBorderIndex(lines);
-					const topIndicator = scrollIndicator(lines[0] ?? "");
-					const bottomIndicator = scrollIndicator(lines[bottomIndex] ?? "");
+					const lines = renderEditor(innerWidth);
+					const border = editor.borderColor?.bind(editor) ?? ((text: string) => hudTheme.fg("accent", text));
+					const bottomIndex = isEditorBorderLine(lines[0] ?? "")
+						? findBottomBorderIndex(lines)
+						: undefined;
+					const topIndicator = bottomIndex === undefined ? "" : scrollIndicator(lines[0] ?? "");
+					const bottomIndicator = bottomIndex === undefined ? "" : scrollIndicator(lines[bottomIndex] ?? "");
 					const modelLabel = currentModelLabel();
-					const usageMetric = inputUsageMetric(theme);
-					const topLeft = topIndicator ? theme.fg("dim", ` ${topIndicator} `) : "";
-					const bottomLeft = bottomIndicator ? theme.fg("dim", ` ${bottomIndicator} `) : "";
-					const topRight = modelLabel ? theme.fg("accent", ` ${modelLabel} `) : "";
+					const usageMetric = inputUsageMetric(hudTheme);
+					const topLeft = topIndicator ? hudTheme.fg("dim", ` ${topIndicator} `) : "";
+					const bottomLeft = bottomIndicator ? hudTheme.fg("dim", ` ${bottomIndicator} `) : "";
+					const topRight = modelLabel ? hudTheme.fg("accent", ` ${modelLabel} `) : "";
 					const bottomRight = usageMetric ? ` ${usageMetric} ` : "";
-					const rendered: string[] = [
-						fitHorizontalBorder(topLeft, topRight, width, border, "╭", "╮"),
-					];
+					const rendered = [fitHorizontalBorder(topLeft, topRight, width, border, "╭", "╮")];
 
-					for (let i = 1; i < lines.length; i++) {
+					for (let i = bottomIndex === undefined ? 0 : 1; i < lines.length; i++) {
 						const line = lines[i] ?? "";
 						if (i === bottomIndex) {
 							rendered.push(fitHorizontalBorder(bottomLeft, bottomRight, width, border, "╰", "╯"));
-						} else if (i > bottomIndex) {
+						} else if (bottomIndex !== undefined && i > bottomIndex) {
 							rendered.push(fitLine(line, width));
 						} else {
 							rendered.push(`${border("│")}${padAnsiLine(line, innerWidth)}${border("│")}`);
 						}
 					}
+					if (bottomIndex === undefined) {
+						rendered.push(fitHorizontalBorder(bottomLeft, bottomRight, width, border, "╰", "╯"));
+					}
 
 					return rendered;
 				} catch (err) {
-					if (isStaleExtensionError(err)) return super.render(width);
+					if (isStaleExtensionError(err)) return renderEditor(width);
 					throw err;
 				}
-			}
-		}
-
-		const setHudEditor = () => {
-			if (disposed || currentCtx !== ctx) return;
-			ctx.ui.setEditorComponent((tui, theme, keybindings) => new HudEditor(tui, theme, keybindings));
+			};
+			return editor;
 		};
-
-		setHudEditor();
-		clearEditorInstallTimer();
-		// Some editor extensions also install during session_start. Defer one
-		// extra tick so this package's chrome remains the final editor wrapper.
-		editorInstallTimer = setTimeout(() => {
-			editorInstallTimer = null;
-			try {
-				setHudEditor();
-			} catch (err) {
-				if (!isStaleExtensionError(err)) throw err;
-			}
-		}, 0);
+		installedEditor = {
+			factory: editorFactory,
+			previousFactory,
+			disable: () => { editorActive = false; },
+		};
+		ctx.ui.setEditorComponent(editorFactory);
 	}
 
 	function refreshAndRender(ctx: ExtensionContext) {
@@ -997,7 +959,8 @@ export default function (pi: ExtensionAPI) {
 		disposed = true;
 		clearGitPoll();
 		clearSubscriptionProbe();
-		clearEditorInstallTimer();
+		installedEditor?.disable();
+		installedEditor = null;
 		footerTui = null;
 		editorTui = null;
 	});
@@ -1040,13 +1003,14 @@ export default function (pi: ExtensionAPI) {
 			disposed = true;
 			clearGitPoll();
 			clearSubscriptionProbe();
-			clearEditorInstallTimer();
 			footerTui = null;
 			editorTui = null;
 			ctx.ui.setFooter(undefined);
-			ctx.ui.setEditorComponent(undefined);
-			ctx.ui.setWidget(WIDGET_ID, undefined);
-			ctx.ui.setWidget(LEGACY_WIDGET_ID, undefined);
+			installedEditor?.disable();
+			if (installedEditor && ctx.ui.getEditorComponent() === installedEditor.factory) {
+				ctx.ui.setEditorComponent(installedEditor.previousFactory);
+			}
+			installedEditor = null;
 			ctx.ui.notify("Session HUD disabled", "info");
 		}
 	}

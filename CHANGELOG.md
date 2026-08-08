@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Compose the HUD chrome with an existing custom editor instead of replacing it through a deferred install race.
+- Remove obsolete widget cleanup and unreachable footer-data fallbacks.
+
 ## [0.5.1] - 2026-08-08
 
 - Read Pi's standard `fast-mode` extension status so the input-border lightning indicator updates immediately and no longer depends on package or request-hook order.
