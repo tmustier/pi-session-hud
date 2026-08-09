@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## [0.5.2] - 2026-08-08
 
 - Compose the HUD chrome with an existing custom editor instead of replacing it through a deferred install race.
+- Preserve custom-editor behavior and content, including borderless editors and extensions that wrap the HUD later.
+- Restore the previous editor cleanly when toggling the HUD off.
 - Remove obsolete widget cleanup and unreachable footer-data fallbacks.
 
 ## [0.5.1] - 2026-08-08
