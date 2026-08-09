@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Stop polling Git while idle and omit expensive line counts in git-crypt repositories.
+
 ## [0.5.2] - 2026-08-08
 
 - Compose the HUD chrome with an existing custom editor instead of replacing it through a deferred install race.

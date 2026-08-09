@@ -19,7 +19,7 @@ The footer line, left to right:
 
 - colour-coded context usage bar, percentage, and used/window token counts; when `pi-auto-compact` lowers the window, the limit gets a down arrow such as `200k↓`
 - current working directory and git branch
-- git diff stats (`+x -y`, or `~` for dirty-without-line-count changes)
+- git diff stats (`+x -y`, or `~` when dirty); git-crypt repositories show dirty state without line counts
 - session name, or the first few words of the first user message when unnamed
 - right edge: active extension statuses followed by provider detail, for example `openai-codex weekly reset in 3d04h`, or just the provider name on API-key billing; an active `fast-mode` status is promoted to the editor-border lightning symbol instead of duplicated here
 
@@ -85,6 +85,8 @@ How to read the numbers:
 - on API-key billing the bottom border shows Pi's calculated session cost instead
 
 The HUD and auto-compact communicate through Pi's shared extension event bus. The HUD does not read or duplicate auto-compact's configuration rules. Run `/reload` after installing or changing either extension.
+
+Git state refreshes at session start and after each agent run, not while idle.
 
 On narrow terminals the footer collapses gracefully: context + repo/branch/diff survive first, then the session label; the right-side reset detail shrinks to just the countdown (`3d04h`) and then disappears.
 

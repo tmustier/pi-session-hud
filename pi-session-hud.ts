@@ -30,6 +30,7 @@ const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const ONE_WEEK_MINUTES = 7 * 24 * 60;
 const SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS = 5 * 60 * 1000;
 const SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS = 60 * 1000;
+const GIT_COMMAND_TIMEOUT_MS = 2000;
 const ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20";
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 
@@ -595,7 +596,8 @@ export default function (pi: ExtensionAPI) {
 	let gitAdded = 0;
 	let gitRemoved = 0;
 	let gitDirty = false;
-	let gitPollTimer: ReturnType<typeof setInterval> | null = null;
+	let gitRefreshInFlight = false;
+	let gitRefreshPending = false;
 	let subscriptionProbeTimer: ReturnType<typeof setInterval> | null = null;
 	let currentCtx: ExtensionContext | null = null;
 	let firstUserText: string | null = null;
@@ -653,12 +655,6 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 
-	function clearGitPoll() {
-		if (!gitPollTimer) return;
-		clearInterval(gitPollTimer);
-		gitPollTimer = null;
-	}
-
 	function clearSubscriptionProbe() {
 		if (!subscriptionProbeTimer) return;
 		clearInterval(subscriptionProbeTimer);
@@ -704,38 +700,49 @@ export default function (pi: ExtensionAPI) {
 
 	async function refreshGit(ctx: ExtensionContext | null = currentCtx) {
 		if (!ctx || disposed) return;
+		if (gitRefreshInFlight) {
+			gitRefreshPending = true;
+			return;
+		}
 
+		gitRefreshInFlight = true;
 		try {
 			const cwd = ctx.cwd;
-			const [diffResult, statusResult] = await Promise.all([
-				pi.exec("git", ["diff", "--shortstat", "HEAD"], { cwd, timeout: 2000 }).catch(() => undefined),
-				pi.exec("git", ["status", "--porcelain"], { cwd, timeout: 2000 }).catch(() => undefined),
-			]);
+			const configResult = await pi.exec(
+				"git",
+				["config", "--local", "--get", "filter.git-crypt.clean"],
+				{ cwd, timeout: GIT_COMMAND_TIMEOUT_MS },
+			).catch(() => undefined);
+			if (disposed || ctx !== currentCtx) return;
+			const dirtyOnly = configResult?.code === 0 && Boolean(configResult.stdout.trim());
+
+			const statusPromise = pi.exec(
+				"git",
+				["status", "--porcelain"],
+				{ cwd, timeout: GIT_COMMAND_TIMEOUT_MS },
+			).catch(() => undefined);
+			const diffPromise = dirtyOnly
+				? Promise.resolve(undefined)
+				: pi.exec(
+					"git",
+					["diff", "--shortstat", "HEAD"],
+					{ cwd, timeout: GIT_COMMAND_TIMEOUT_MS },
+				).catch(() => undefined);
+			const [statusResult, diffResult] = await Promise.all([statusPromise, diffPromise]);
 
 			if (disposed || ctx !== currentCtx) return;
-			if (diffResult?.code !== 0 || statusResult?.code !== 0) {
-				gitAdded = 0;
-				gitRemoved = 0;
-				gitDirty = false;
-				footerTui?.requestRender();
-				return;
-			}
-
-			const parsed = parseGitShortstat(diffResult?.stdout ?? "");
+			const valid = statusResult?.code === 0 && (dirtyOnly || diffResult?.code === 0);
+			const parsed = valid ? parseGitShortstat(diffResult?.stdout ?? "") : { added: 0, removed: 0 };
 			gitAdded = parsed.added;
 			gitRemoved = parsed.removed;
-			gitDirty = Boolean(statusResult?.stdout.trim());
+			gitDirty = valid && Boolean(statusResult?.stdout.trim());
 			footerTui?.requestRender();
-		} catch (err) {
-			if (isStaleExtensionError(err)) return;
-			throw err;
+		} finally {
+			gitRefreshInFlight = false;
+			const refreshAgain = gitRefreshPending;
+			gitRefreshPending = false;
+			if (refreshAgain && !disposed) void refreshGit();
 		}
-	}
-
-	function startGitPoll(ctx: ExtensionContext) {
-		clearGitPoll();
-		void refreshGit(ctx);
-		gitPollTimer = setInterval(() => { void refreshGit(); }, 10_000);
 	}
 
 	function currentModelLabel(): string {
@@ -865,7 +872,8 @@ export default function (pi: ExtensionAPI) {
 		requestAutoCompactPolicy(ctx);
 
 		disposed = false;
-		startGitPoll(ctx);
+		gitRefreshPending = false;
+		void refreshGit(ctx);
 		startSubscriptionProbe(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			footerTui = tui;
@@ -876,7 +884,6 @@ export default function (pi: ExtensionAPI) {
 				dispose() {
 					disposed = true;
 					footerTui = null;
-					clearGitPoll();
 					clearSubscriptionProbe();
 					unsubscribeBranch();
 				},
@@ -957,7 +964,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		unregisterAutoCompactPolicy();
 		disposed = true;
-		clearGitPoll();
 		clearSubscriptionProbe();
 		installedEditor?.disable();
 		installedEditor = null;
@@ -1001,7 +1007,6 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("Session HUD enabled", "info");
 		} else {
 			disposed = true;
-			clearGitPoll();
 			clearSubscriptionProbe();
 			footerTui = null;
 			editorTui = null;
