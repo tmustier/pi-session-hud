@@ -315,11 +315,15 @@ function numberFrom(value: unknown): number | undefined {
 	return undefined;
 }
 
-function normalizeUsagePercent(value: unknown): number | undefined {
+function normalizeUsedPercent(value: unknown): number | undefined {
+	const parsed = numberFrom(value);
+	return parsed === undefined ? undefined : clamp(parsed, 0, 100);
+}
+
+function normalizeUtilizationPercent(value: unknown): number | undefined {
 	const parsed = numberFrom(value);
 	if (parsed === undefined) return undefined;
-	const percent = parsed <= 1 ? parsed * 100 : parsed;
-	return clamp(percent, 0, 100);
+	return clamp(parsed <= 1 ? parsed * 100 : parsed, 0, 100);
 }
 
 function getHeader(headers: Record<string, string>, name: string): string | undefined {
@@ -361,7 +365,7 @@ function selectWeeklyWindow(windows: Array<RateLimitWindowUsage | null | undefin
 }
 
 function parseCodexHeaderWindow(headers: Record<string, string>, slot: "primary" | "secondary"): RateLimitWindowUsage | null {
-	const usedPercent = normalizeUsagePercent(getHeader(headers, `x-codex-${slot}-used-percent`));
+	const usedPercent = normalizeUsedPercent(getHeader(headers, `x-codex-${slot}-used-percent`));
 	if (usedPercent === undefined) return null;
 	return {
 		usedPercent,
@@ -381,7 +385,7 @@ function parseCodexSubscriptionUsageFromHeaders(headers: Record<string, string>)
 }
 
 function parseAnthropicSubscriptionUsageFromHeaders(headers: Record<string, string>): SubscriptionUsage | null {
-	const usedPercent = normalizeUsagePercent(getHeader(headers, "anthropic-ratelimit-unified-7d-utilization"));
+	const usedPercent = normalizeUtilizationPercent(getHeader(headers, "anthropic-ratelimit-unified-7d-utilization"));
 	if (usedPercent === undefined) return null;
 	const resetAtSeconds = numberFrom(getHeader(headers, "anthropic-ratelimit-unified-7d-reset"));
 	return makeSubscriptionUsage("anthropic", usedPercent, ONE_WEEK_MS, resetAtSeconds);
@@ -498,7 +502,8 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
 
 function parseCodexPayloadWindow(window: any): RateLimitWindowUsage | null {
 	if (!window || typeof window !== "object") return null;
-	const usedPercent = normalizeUsagePercent(window.used_percent ?? window.usedPercent ?? window.utilization);
+	const usedPercent = normalizeUsedPercent(window.used_percent ?? window.usedPercent)
+		?? normalizeUtilizationPercent(window.utilization);
 	if (usedPercent === undefined) return null;
 	const windowSeconds = numberFrom(window.limit_window_seconds ?? window.window_seconds ?? window.windowSeconds);
 	const windowMinutes = numberFrom(window.window_minutes ?? window.window_duration_mins ?? window.windowMinutes)
@@ -525,7 +530,7 @@ function collectCodexPayloadWindows(payload: any): RateLimitWindowUsage[] {
 	return windows;
 }
 
-function parseCodexSubscriptionUsagePayload(payload: unknown): SubscriptionUsage | null {
+export function parseCodexSubscriptionUsagePayload(payload: unknown): SubscriptionUsage | null {
 	const weekly = selectWeeklyWindow(collectCodexPayloadWindows(payload));
 	return weekly
 		? makeSubscriptionUsage("openai-codex", weekly.usedPercent, ONE_WEEK_MS, weekly.resetAtSeconds)
@@ -534,7 +539,7 @@ function parseCodexSubscriptionUsagePayload(payload: unknown): SubscriptionUsage
 
 function parseAnthropicSubscriptionUsagePayload(payload: any): SubscriptionUsage | null {
 	const weekly = payload?.seven_day ?? payload?.seven_day_oauth_apps;
-	const usedPercent = normalizeUsagePercent(weekly?.utilization);
+	const usedPercent = normalizeUtilizationPercent(weekly?.utilization);
 	if (usedPercent === undefined) return null;
 	const resetAtMs = typeof weekly?.resets_at === "string" ? Date.parse(weekly.resets_at) : undefined;
 	const resetAtSeconds = resetAtMs && Number.isFinite(resetAtMs) ? resetAtMs / 1000 : undefined;
