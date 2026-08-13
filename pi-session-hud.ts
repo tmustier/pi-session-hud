@@ -25,8 +25,7 @@ const CONTEXT_BAR_WIDTH = 6;
 const SESSION_FALLBACK_WORDS = 8;
 const EDITOR_GUTTER_WIDTH = 1;
 const FOOTER_GUTTER_WIDTH = EDITOR_GUTTER_WIDTH;
-const SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS = new Set(["openai-codex", "openai", "anthropic"]);
-const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS = new Set(["openai-codex", "anthropic"]);
 const ONE_WEEK_MINUTES = 7 * 24 * 60;
 const SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS = 5 * 60 * 1000;
 const SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS = 60 * 1000;
@@ -65,9 +64,7 @@ type InstalledEditor = {
 type SubscriptionUsage = {
 	usedPercent: number;
 	provider: string;
-	observedAt: number;
 	resetAtMs?: number;
-	windowMs?: number;
 };
 
 type RateLimitWindowUsage = {
@@ -315,15 +312,14 @@ function numberFrom(value: unknown): number | undefined {
 	return undefined;
 }
 
-function normalizeUsedPercent(value: unknown): number | undefined {
+function usedPercentFrom(value: unknown): number | undefined {
 	const parsed = numberFrom(value);
-	return parsed === undefined ? undefined : clamp(parsed, 0, 100);
+	return parsed !== undefined && parsed >= 0 && parsed <= 100 ? parsed : undefined;
 }
 
-function normalizeUtilizationPercent(value: unknown): number | undefined {
+function utilizationPercentFrom(value: unknown): number | undefined {
 	const parsed = numberFrom(value);
-	if (parsed === undefined) return undefined;
-	return clamp(parsed <= 1 ? parsed * 100 : parsed, 0, 100);
+	return parsed !== undefined && parsed >= 0 && parsed <= 1 ? parsed * 100 : undefined;
 }
 
 function getHeader(headers: Record<string, string>, name: string): string | undefined {
@@ -336,36 +332,20 @@ function getHeader(headers: Record<string, string>, name: string): string | unde
 	return undefined;
 }
 
-function makeSubscriptionUsage(
-	provider: string,
-	usedPercent: number,
-	windowMs?: number,
-	resetAtSeconds?: number,
-): SubscriptionUsage {
+function makeSubscriptionUsage(provider: string, usedPercent: number, resetAtSeconds?: number): SubscriptionUsage {
 	const resetAtMs = resetAtSeconds && resetAtSeconds > 0 ? resetAtSeconds * 1000 : undefined;
-	return {
-		provider,
-		usedPercent: clamp(usedPercent, 0, 100),
-		observedAt: Date.now(),
-		...(resetAtMs ? { resetAtMs } : {}),
-		...(windowMs ? { windowMs } : {}),
-	};
+	return { provider, usedPercent, ...(resetAtMs ? { resetAtMs } : {}) };
 }
 
-function isApproximateWindow(minutes: number | undefined, expectedMinutes: number): boolean {
-	if (!minutes || minutes <= 0) return false;
-	return minutes >= expectedMinutes * 0.95 && minutes <= expectedMinutes * 1.05;
-}
-
-function selectWeeklyWindow(windows: Array<RateLimitWindowUsage | null | undefined>): RateLimitWindowUsage | null {
-	const weekly = windows
-		.filter((window): window is RateLimitWindowUsage => Boolean(window && isApproximateWindow(window.windowMinutes, ONE_WEEK_MINUTES)))
-		.sort((a, b) => (b.windowMinutes ?? 0) - (a.windowMinutes ?? 0));
-	return weekly[0] ?? null;
+function selectWeeklyWindow(windows: Array<RateLimitWindowUsage | null>): RateLimitWindowUsage | null {
+	return windows.find((window) => {
+		const minutes = window?.windowMinutes ?? 0;
+		return minutes >= ONE_WEEK_MINUTES * 0.95 && minutes <= ONE_WEEK_MINUTES * 1.05;
+	}) ?? null;
 }
 
 function parseCodexHeaderWindow(headers: Record<string, string>, slot: "primary" | "secondary"): RateLimitWindowUsage | null {
-	const usedPercent = normalizeUsedPercent(getHeader(headers, `x-codex-${slot}-used-percent`));
+	const usedPercent = usedPercentFrom(getHeader(headers, `x-codex-${slot}-used-percent`));
 	if (usedPercent === undefined) return null;
 	return {
 		usedPercent,
@@ -379,22 +359,20 @@ function parseCodexSubscriptionUsageFromHeaders(headers: Record<string, string>)
 		parseCodexHeaderWindow(headers, "primary"),
 		parseCodexHeaderWindow(headers, "secondary"),
 	]);
-	return weekly
-		? makeSubscriptionUsage("openai-codex", weekly.usedPercent, ONE_WEEK_MS, weekly.resetAtSeconds)
-		: null;
+	return weekly ? makeSubscriptionUsage("openai-codex", weekly.usedPercent, weekly.resetAtSeconds) : null;
 }
 
 function parseAnthropicSubscriptionUsageFromHeaders(headers: Record<string, string>): SubscriptionUsage | null {
-	const usedPercent = normalizeUtilizationPercent(getHeader(headers, "anthropic-ratelimit-unified-7d-utilization"));
+	const usedPercent = utilizationPercentFrom(getHeader(headers, "anthropic-ratelimit-unified-7d-utilization"));
 	if (usedPercent === undefined) return null;
 	const resetAtSeconds = numberFrom(getHeader(headers, "anthropic-ratelimit-unified-7d-reset"));
-	return makeSubscriptionUsage("anthropic", usedPercent, ONE_WEEK_MS, resetAtSeconds);
+	return makeSubscriptionUsage("anthropic", usedPercent, resetAtSeconds);
 }
 
 function parseSubscriptionUsageFromHeaders(provider: string | undefined, headers: Record<string, string>): SubscriptionUsage | null {
 	if (provider === "anthropic") return parseAnthropicSubscriptionUsageFromHeaders(headers);
-	if (provider === "openai-codex" || provider === "openai") return parseCodexSubscriptionUsageFromHeaders(headers);
-	return parseAnthropicSubscriptionUsageFromHeaders(headers) ?? parseCodexSubscriptionUsageFromHeaders(headers);
+	if (provider === "openai-codex") return parseCodexSubscriptionUsageFromHeaders(headers);
+	return null;
 }
 
 function formatResetCountdown(resetAtMs: number): string {
@@ -443,47 +421,7 @@ function sessionCost(ctx: ExtensionContext | null): number {
 }
 
 function isUsingSubscriptionAuth(ctx: ExtensionContext | null): boolean {
-	try {
-		if (!ctx?.model) return false;
-		return Boolean(ctx.modelRegistry.isUsingOAuth(ctx.model as any));
-	} catch {
-		return false;
-	}
-}
-
-function oauthCredential(ctx: ExtensionContext, provider: string): any | undefined {
-	try {
-		const credential = ctx.modelRegistry.authStorage.get(provider) as any;
-		return credential?.type === "oauth" ? credential : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function base64UrlDecodeJson(part: string): any | undefined {
-	try {
-		const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
-		const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-		return JSON.parse(globalThis.atob(padded));
-	} catch {
-		return undefined;
-	}
-}
-
-function extractChatGptAccountId(token: string, credential?: any): string | undefined {
-	const fromCredential = credential?.accountId ?? credential?.account_id ?? credential?.chatgpt_account_id;
-	if (typeof fromCredential === "string" && fromCredential) return fromCredential;
-	const payload = base64UrlDecodeJson(token.split(".")[1] ?? "");
-	const authClaim = payload?.["https://api.openai.com/auth"];
-	const fromToken = authClaim?.chatgpt_account_id ?? authClaim?.account_id;
-	return typeof fromToken === "string" && fromToken ? fromToken : undefined;
-}
-
-function resolveCodexBackendBaseUrl(baseUrl: string | undefined): string {
-	let normalized = (baseUrl || DEFAULT_CODEX_BASE_URL).replace(/\/+$/, "");
-	if (normalized.endsWith("/codex/responses")) normalized = normalized.slice(0, -"/codex/responses".length);
-	else if (normalized.endsWith("/codex")) normalized = normalized.slice(0, -"/codex".length);
-	return normalized || DEFAULT_CODEX_BASE_URL;
+	return Boolean(ctx?.model && ctx.modelRegistry.isUsingOAuth(ctx.model));
 }
 
 async function fetchJson(url: string, headers: Record<string, string>, timeoutMs = 5000): Promise<unknown | null> {
@@ -501,77 +439,53 @@ async function fetchJson(url: string, headers: Record<string, string>, timeoutMs
 }
 
 function parseCodexPayloadWindow(window: any): RateLimitWindowUsage | null {
-	if (!window || typeof window !== "object") return null;
-	const usedPercent = normalizeUsedPercent(window.used_percent ?? window.usedPercent)
-		?? normalizeUtilizationPercent(window.utilization);
+	const usedPercent = usedPercentFrom(window?.used_percent);
 	if (usedPercent === undefined) return null;
-	const windowSeconds = numberFrom(window.limit_window_seconds ?? window.window_seconds ?? window.windowSeconds);
-	const windowMinutes = numberFrom(window.window_minutes ?? window.window_duration_mins ?? window.windowMinutes)
-		?? (windowSeconds ? Math.ceil(windowSeconds / 60) : undefined);
+	const windowSeconds = numberFrom(window.limit_window_seconds);
 	return {
 		usedPercent,
-		windowMinutes,
-		resetAtSeconds: numberFrom(window.reset_at ?? window.resets_at ?? window.resetAt),
+		windowMinutes: windowSeconds ? Math.ceil(windowSeconds / 60) : undefined,
+		resetAtSeconds: numberFrom(window.reset_at),
 	};
 }
 
-function collectCodexPayloadWindows(payload: any): RateLimitWindowUsage[] {
-	const windows: RateLimitWindowUsage[] = [];
-	const addRateLimit = (rateLimit: any) => {
-		if (!rateLimit || typeof rateLimit !== "object") return;
-		const primary = parseCodexPayloadWindow(rateLimit.primary_window ?? rateLimit.primary);
-		const secondary = parseCodexPayloadWindow(rateLimit.secondary_window ?? rateLimit.secondary);
-		if (primary) windows.push(primary);
-		if (secondary) windows.push(secondary);
-	};
-	addRateLimit(payload?.rate_limit);
-	const additional = Array.isArray(payload?.additional_rate_limits) ? payload.additional_rate_limits : [];
-	for (const detail of additional) addRateLimit(detail?.rate_limit);
-	return windows;
-}
-
-export function parseCodexSubscriptionUsagePayload(payload: unknown): SubscriptionUsage | null {
-	const weekly = selectWeeklyWindow(collectCodexPayloadWindows(payload));
-	return weekly
-		? makeSubscriptionUsage("openai-codex", weekly.usedPercent, ONE_WEEK_MS, weekly.resetAtSeconds)
-		: null;
+export function parseCodexSubscriptionUsagePayload(payload: any): SubscriptionUsage | null {
+	const rateLimit = payload?.rate_limit;
+	const weekly = selectWeeklyWindow([
+		parseCodexPayloadWindow(rateLimit?.primary_window),
+		parseCodexPayloadWindow(rateLimit?.secondary_window),
+	]);
+	return weekly ? makeSubscriptionUsage("openai-codex", weekly.usedPercent, weekly.resetAtSeconds) : null;
 }
 
 function parseAnthropicSubscriptionUsagePayload(payload: any): SubscriptionUsage | null {
 	const weekly = payload?.seven_day ?? payload?.seven_day_oauth_apps;
-	const usedPercent = normalizeUtilizationPercent(weekly?.utilization);
+	const usedPercent = utilizationPercentFrom(weekly?.utilization);
 	if (usedPercent === undefined) return null;
 	const resetAtMs = typeof weekly?.resets_at === "string" ? Date.parse(weekly.resets_at) : undefined;
 	const resetAtSeconds = resetAtMs && Number.isFinite(resetAtMs) ? resetAtMs / 1000 : undefined;
-	return makeSubscriptionUsage("anthropic", usedPercent, ONE_WEEK_MS, resetAtSeconds);
+	return makeSubscriptionUsage("anthropic", usedPercent, resetAtSeconds);
 }
 
 async function fetchCodexSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
-	const provider = ctx.model?.provider;
-	if (provider !== "openai-codex" && provider !== "openai") return null;
-	const token = await ctx.modelRegistry.getApiKeyForProvider(provider);
+	const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
 	if (!token) return null;
-	const credential = oauthCredential(ctx, provider);
-	const accountId = extractChatGptAccountId(token, credential);
+	const credential = ctx.modelRegistry.authStorage.get("openai-codex");
+	const accountId = credential?.type === "oauth" && typeof credential.accountId === "string"
+		? credential.accountId
+		: undefined;
 	if (!accountId) return null;
-	const base = resolveCodexBackendBaseUrl((ctx.model as any)?.baseUrl);
-	const headers = {
+	const payload = await fetchJson(`${DEFAULT_CODEX_BASE_URL}/wham/usage`, {
 		Authorization: `Bearer ${token}`,
 		"chatgpt-account-id": accountId,
 		originator: "pi-session-hud",
 		"User-Agent": "pi-session-hud",
 		accept: "application/json",
-	};
-	for (const path of ["/api/codex/usage", "/wham/usage"]) {
-		const payload = await fetchJson(`${base}${path}`, headers);
-		const usage = payload ? parseCodexSubscriptionUsagePayload(payload) : null;
-		if (usage) return usage;
-	}
-	return null;
+	});
+	return payload ? parseCodexSubscriptionUsagePayload(payload) : null;
 }
 
 async function fetchAnthropicSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
-	if (ctx.model?.provider !== "anthropic") return null;
 	const token = await ctx.modelRegistry.getApiKeyForProvider("anthropic");
 	if (!token) return null;
 	const payload = await fetchJson("https://api.anthropic.com/api/oauth/usage", {
@@ -586,9 +500,7 @@ async function fetchAnthropicSubscriptionUsage(ctx: ExtensionContext): Promise<S
 async function fetchProviderSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
 	if (!isUsingSubscriptionAuth(ctx)) return null;
 	if (ctx.model?.provider === "anthropic") return fetchAnthropicSubscriptionUsage(ctx);
-	if (ctx.model?.provider === "openai-codex" || ctx.model?.provider === "openai") {
-		return fetchCodexSubscriptionUsage(ctx);
-	}
+	if (ctx.model?.provider === "openai-codex") return fetchCodexSubscriptionUsage(ctx);
 	return null;
 }
 
@@ -778,11 +690,7 @@ export default function (pi: ExtensionAPI) {
 
 	function currentSubscriptionUsage(): SubscriptionUsage | null {
 		if (!currentCtx || !isUsingSubscriptionAuth(currentCtx) || !latestSubscriptionUsage) return null;
-		const provider = currentCtx.model?.provider;
-		if (provider === latestSubscriptionUsage.provider) return latestSubscriptionUsage;
-		if (provider === "openai" && latestSubscriptionUsage.provider === "openai-codex") return latestSubscriptionUsage;
-		if (provider === "openai-codex" && latestSubscriptionUsage.provider === "openai") return latestSubscriptionUsage;
-		return null;
+		return currentCtx.model?.provider === latestSubscriptionUsage.provider ? latestSubscriptionUsage : null;
 	}
 
 	function inputUsageMetric(theme?: HudTheme): string {
