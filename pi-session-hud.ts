@@ -497,13 +497,6 @@ async function fetchAnthropicSubscriptionUsage(ctx: ExtensionContext): Promise<S
 	return payload ? parseAnthropicSubscriptionUsagePayload(payload) : null;
 }
 
-async function fetchProviderSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
-	if (!isUsingSubscriptionAuth(ctx)) return null;
-	if (ctx.model?.provider === "anthropic") return fetchAnthropicSubscriptionUsage(ctx);
-	if (ctx.model?.provider === "openai-codex") return fetchCodexSubscriptionUsage(ctx);
-	return null;
-}
-
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
 	let contextPercent: number | null = null;
@@ -523,7 +516,6 @@ export default function (pi: ExtensionAPI) {
 	let installedEditor: InstalledEditor | null = null;
 	let latestSubscriptionUsage: SubscriptionUsage | null = null;
 	let lastSubscriptionProbeAt = 0;
-	let subscriptionProbeInFlight = false;
 	let disposed = false;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
 	let lastRequestUsedFastMode = false;
@@ -585,34 +577,22 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function refreshSubscriptionUsage(ctx: ExtensionContext | null = currentCtx, force = false) {
+		const provider = ctx?.model?.provider;
 		if (
 			!ctx ||
 			disposed ||
-			!SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS.has(ctx.model?.provider ?? "") ||
-			!isUsingSubscriptionAuth(ctx)
+			!SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS.has(provider ?? "") ||
+			!isUsingSubscriptionAuth(ctx) ||
+			(!force && Date.now() - lastSubscriptionProbeAt < SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS)
 		) return;
-		if (subscriptionProbeInFlight) return;
-		if (!force && Date.now() - lastSubscriptionProbeAt < SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS) return;
 
 		lastSubscriptionProbeAt = Date.now();
-		subscriptionProbeInFlight = true;
-		try {
-			const usage = await fetchProviderSubscriptionUsage(ctx);
-			if (disposed || ctx !== currentCtx) return;
-			updateSubscriptionUsage(usage);
-		} catch {
-			// Best-effort only: if provider quota probes fail, keep the HUD quiet.
-		} finally {
-			subscriptionProbeInFlight = false;
-		}
-	}
-
-	function startSubscriptionProbe(ctx: ExtensionContext) {
-		clearSubscriptionProbe();
-		latestSubscriptionUsage = null;
-		lastSubscriptionProbeAt = 0;
-		void refreshSubscriptionUsage(ctx, true);
-		subscriptionProbeTimer = setInterval(() => { void refreshSubscriptionUsage(); }, SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS);
+		const usage = await (provider === "anthropic"
+			? fetchAnthropicSubscriptionUsage(ctx)
+			: fetchCodexSubscriptionUsage(ctx)
+		).catch(() => null);
+		if (disposed || ctx !== currentCtx) return;
+		updateSubscriptionUsage(usage);
 	}
 
 	async function refreshGit(ctx: ExtensionContext | null = currentCtx) {
@@ -787,7 +767,12 @@ export default function (pi: ExtensionAPI) {
 		disposed = false;
 		gitRefreshPending = false;
 		void refreshGit(ctx);
-		startSubscriptionProbe(ctx);
+		clearSubscriptionProbe();
+		latestSubscriptionUsage = null;
+		void refreshSubscriptionUsage(ctx, true);
+		subscriptionProbeTimer = setInterval(() => {
+			void refreshSubscriptionUsage();
+		}, SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			footerTui = tui;
 			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
@@ -907,8 +892,7 @@ export default function (pi: ExtensionAPI) {
 		lastRequestUsedFastMode = false;
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
-		latestSubscriptionUsage = null;
-		lastSubscriptionProbeAt = 0;
+		if (latestSubscriptionUsage?.provider !== ctx.model?.provider) latestSubscriptionUsage = null;
 		void refreshSubscriptionUsage(ctx, true);
 		requestChromeRender();
 	});
