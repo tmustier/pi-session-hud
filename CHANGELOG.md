@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-01
+
 - Stop polling Git while idle and omit expensive line counts in git-crypt repositories.
 - Treat OpenAI Codex `used_percent` values as percentages so 1% usage is not displayed as 100% used.
 - Keep OpenAI subscription usage visible and current across model switches.
