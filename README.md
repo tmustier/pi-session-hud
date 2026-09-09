@@ -26,6 +26,7 @@ The footer line, left to right:
 The editor border:
 
 - top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when fast mode is active, the single-column lightning symbol `↯` appears first
+- in Pi's fullscreen TUI mode (`--tui-mode fullscreen` or the `tuiMode` setting), click the model id to open Pi's model selector and click the thinking level to cycle to the next level; these run the same `app.model.select` and `app.thinking.cycle` actions as Ctrl+L and Shift+Tab, so rebinding those keys does not change the clicks
 - bottom right: `44% left` weekly subscription quota, or session cost (`$0.042`) when using API-key billing
 - one-column input gutter with word wrapping inside a full rounded border; scroll indicators (`↑ 3 more`) stay visible in the border
 
@@ -81,12 +82,14 @@ How to read the numbers:
 - `↯` means fast mode is active: the HUD reads Pi's standard `fast-mode` extension status immediately and also passively observes serialized requests containing `service_tier: "priority"` or `speed: "fast"` as a fallback; it never enables or modifies fast mode
 - the standard extension-status path is independent of package and request-hook order; payload-only integrations update the indicator on the next provider request and still need their payload patch to run before the HUD's observation hook
 - `44% left` is your weekly subscription quota remaining; it appears when Pi is authenticated via OpenAI Codex or Anthropic subscription OAuth
-- quota comes from provider rate-limit headers on each response, plus a background probe of the provider usage endpoint every 5 minutes; if neither is available the metric simply stays absent
+- quota comes from a background probe of the provider usage endpoint at session start, after model switches, and every 5 minutes, plus provider rate-limit headers on each response when the transport exposes them (OpenAI Codex only does so on the SSE transport, not the default WebSocket transport); if neither is available the metric simply stays absent
 - on API-key billing the bottom border shows Pi's calculated session cost instead
 
 The HUD and auto-compact communicate through Pi's shared extension event bus. The HUD does not read or duplicate auto-compact's configuration rules. Run `/reload` after installing or changing either extension.
 
 Git state refreshes at session start and after each agent run, not while idle.
+
+Mouse clicks are only delivered in Pi's fullscreen TUI mode; in regular mode the terminal owns the scrollback and Pi does not capture mouse input.
 
 On narrow terminals the footer collapses gracefully: context + repo/branch/diff survive first, then the session label; the right-side reset detail shrinks to just the countdown (`3d04h`) and then disappears.
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Make the model id and thinking level in the input border clickable in Pi's fullscreen TUI mode: the model opens Pi's model selector and the thinking level cycles to the next level, matching the `app.model.select` and `app.thinking.cycle` keybindings.
+- Forward other mouse input to the wrapped editor in its own coordinate space so click-to-position, drag selection, and autocomplete clicks keep working inside the HUD frame.
+- Fix the OpenAI Codex subscription usage probe on Pi 0.80.8 and newer, where `modelRegistry.authStorage` no longer exists; the account id is now read from the OAuth access token as Pi itself does.
+- Keep usage probe and Git refresh results when other events fire while they are in flight; Pi builds a fresh context object per event, so the previous identity check discarded most results and left the weekly quota missing until the next five-minute probe.
+- Build and type-check against Pi 0.85.1.
+
 ## [0.5.3] - 2026-09-01
 
 - Stop polling Git while idle and omit expensive line counts in git-crypt repositories.

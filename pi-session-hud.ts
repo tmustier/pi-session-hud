@@ -1,13 +1,20 @@
 /** Compact context footer and editor chrome for Pi. */
 
 import {
+	type AppKeybinding,
 	CustomEditor,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ReadonlyFooterDataProvider,
 	type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import {
 	AUTO_COMPACT_POLICY_EVENT,
 	AUTO_COMPACT_POLICY_REQUEST_EVENT,
@@ -32,6 +39,11 @@ const SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS = 60 * 1000;
 const GIT_COMMAND_TIMEOUT_MS = 2000;
 const ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20";
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
+const CODEX_JWT_AUTH_CLAIM = "https://api.openai.com/auth";
+const CHROME_TARGET_ACTIONS: Record<ChromeTarget, AppKeybinding> = {
+	model: "app.model.select",
+	thinking: "app.thinking.cycle",
+};
 
 const RESET = "\x1b[0m";
 const FG_DIM = "\x1b[38;2;90;90;90m";
@@ -52,6 +64,18 @@ const CONTEXT_WARNING_LEVELS = {
 };
 
 export type ContextBand = "healthy" | "yellow" | "amber" | "red";
+export type ChromeTarget = "model" | "thinking";
+export type LabelSegment = { text: string; target?: ChromeTarget };
+export type ChromeHotspot = { start: number; end: number; target: ChromeTarget };
+/** Geometry of the last rendered editor chrome, used to route mouse input. */
+export type ChromeLayout = {
+	width: number;
+	innerWidth: number;
+	/** Row of the editor's bottom border, or undefined when the HUD wrapped every editor row. */
+	bottomIndex: number | undefined;
+	lineCount: number;
+	hotspots: ChromeHotspot[];
+};
 type HudTheme = {
 	fg?: (color: ThemeColor, text: string) => string;
 };
@@ -206,7 +230,9 @@ function padAnsiLine(line: string, width: number): string {
 	return `${fitted}${RESET}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
 }
 
-function fitHorizontalBorder(
+type BorderLayout = { line: string; rightStart: number; rightWidth: number };
+
+function layoutHorizontalBorder(
 	left: string,
 	right: string,
 	width: number,
@@ -214,9 +240,9 @@ function fitHorizontalBorder(
 	leftCorner: string,
 	rightCorner: string,
 	fill: (text: string) => string = border,
-): string {
-	if (width <= 0) return "";
-	if (width === 1) return border(leftCorner);
+): BorderLayout {
+	if (width <= 0) return { line: "", rightStart: 0, rightWidth: 0 };
+	if (width === 1) return { line: border(leftCorner), rightStart: 1, rightWidth: 0 };
 
 	let leftText = left;
 	let rightText = right;
@@ -236,8 +262,25 @@ function fitHorizontalBorder(
 		leftText = truncateToWidth(leftText, Math.max(0, visibleWidth(leftText) - 1), "");
 	}
 
-	const gapWidth = Math.max(0, width - fixedWidth - visibleWidth(leftText) - visibleWidth(rightText));
-	return `${border(leftCorner)}${leftText}${fill("─".repeat(gapWidth))}${rightText}${border(rightCorner)}${RESET}`;
+	const rightWidth = visibleWidth(rightText);
+	const gapWidth = Math.max(0, width - fixedWidth - visibleWidth(leftText) - rightWidth);
+	return {
+		line: `${border(leftCorner)}${leftText}${fill("─".repeat(gapWidth))}${rightText}${border(rightCorner)}${RESET}`,
+		rightStart: width - 1 - rightWidth,
+		rightWidth,
+	};
+}
+
+function fitHorizontalBorder(
+	left: string,
+	right: string,
+	width: number,
+	border: (text: string) => string,
+	leftCorner: string,
+	rightCorner: string,
+	fill: (text: string) => string = border,
+): string {
+	return layoutHorizontalBorder(left, right, width, border, leftCorner, rightCorner, fill).line;
 }
 
 function stripAnsi(text: string): string {
@@ -259,10 +302,63 @@ export function requestUsesFastMode(payload: unknown): boolean {
 	return request.service_tier === "priority" || request.speed === "fast";
 }
 
-export function formatModelLabel(modelId: string, thinking: string, fastModeActive: boolean): string {
-	const modelAndThinking = thinking !== "off" ? `${modelId} • ${thinking}` : modelId;
+export function modelLabelSegments(modelId: string, thinking: string, fastModeActive: boolean): LabelSegment[] {
+	const segments: LabelSegment[] = [];
 	// Use a single-column text glyph so the TUI and terminal agree on border width.
-	return fastModeActive ? `↯ • ${modelAndThinking}` : modelAndThinking;
+	if (fastModeActive) segments.push({ text: "↯ • " });
+	segments.push({ text: modelId, target: "model" });
+	if (thinking !== "off") segments.push({ text: " • " }, { text: thinking, target: "thinking" });
+	return segments;
+}
+
+export function formatModelLabel(modelId: string, thinking: string, fastModeActive: boolean): string {
+	return modelLabelSegments(modelId, thinking, fastModeActive).map((segment) => segment.text).join("");
+}
+
+/**
+ * Column ranges (end exclusive) of clickable label segments laid out from `start`,
+ * clipped to `limit` so truncated labels only expose their visible columns.
+ */
+export function labelHotspots(segments: LabelSegment[], start: number, limit: number): ChromeHotspot[] {
+	const hotspots: ChromeHotspot[] = [];
+	let column = start;
+	for (const segment of segments) {
+		const segmentStart = column;
+		column += visibleWidth(segment.text);
+		const end = Math.min(column, limit);
+		if (segment.target && end > segmentStart) hotspots.push({ start: segmentStart, end, target: segment.target });
+	}
+	return hotspots;
+}
+
+export function chromeTargetAt(layout: ChromeLayout, x: number, y: number): ChromeTarget | undefined {
+	if (y !== 0) return undefined;
+	return layout.hotspots.find((hotspot) => x >= hotspot.start && x < hotspot.end)?.target;
+}
+
+/**
+ * Map a mouse event on the HUD chrome back onto the editor it wraps: framed rows
+ * sit one column right of the editor's own render, autocomplete rows below the
+ * bottom border are not indented, and a fully wrapped editor is one row lower.
+ */
+export function translateChromeMouseEvent(event: TuiMouseEvent, layout: ChromeLayout): TuiMouseEvent {
+	if (layout.bottomIndex === undefined) {
+		return { ...event, x: event.x - EDITOR_GUTTER_WIDTH, y: event.y - 1, width: layout.innerWidth, height: layout.lineCount - 2 };
+	}
+	const framed = event.y <= layout.bottomIndex;
+	return { ...event, x: framed ? event.x - EDITOR_GUTTER_WIDTH : event.x, width: layout.innerWidth, height: layout.lineCount };
+}
+
+export function codexAccountIdFromToken(token: string): string | undefined {
+	const payload = token.split(".")[1];
+	if (!payload) return undefined;
+	try {
+		const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+		const accountId = claims?.[CODEX_JWT_AUTH_CLAIM]?.chatgpt_account_id;
+		return typeof accountId === "string" && accountId ? accountId : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function isEditorBorderLine(line: string): boolean {
@@ -470,10 +566,8 @@ function parseAnthropicSubscriptionUsagePayload(payload: any): SubscriptionUsage
 async function fetchCodexSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
 	const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
 	if (!token) return null;
-	const credential = ctx.modelRegistry.authStorage.get("openai-codex");
-	const accountId = credential?.type === "oauth" && typeof credential.accountId === "string"
-		? credential.accountId
-		: undefined;
+	// Pi no longer exposes stored credentials to extensions; the account id lives in the OAuth access token.
+	const accountId = codexAccountIdFromToken(token);
 	if (!accountId) return null;
 	const payload = await fetchJson(`${DEFAULT_CODEX_BASE_URL}/wham/usage`, {
 		Authorization: `Bearer ${token}`,
@@ -517,6 +611,9 @@ export default function (pi: ExtensionAPI) {
 	let latestSubscriptionUsage: SubscriptionUsage | null = null;
 	let lastSubscriptionProbeAt = 0;
 	let disposed = false;
+	// Pi builds a fresh ExtensionContext per event, so async work compares this
+	// generation instead of ctx identity to detect a replaced session.
+	let sessionGeneration = 0;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
 	let lastRequestUsedFastMode = false;
 	let extensionFastModeActive: boolean | null = null;
@@ -587,11 +684,13 @@ export default function (pi: ExtensionAPI) {
 		) return;
 
 		lastSubscriptionProbeAt = Date.now();
+		const generation = sessionGeneration;
 		const usage = await (provider === "anthropic"
 			? fetchAnthropicSubscriptionUsage(ctx)
 			: fetchCodexSubscriptionUsage(ctx)
 		).catch(() => null);
-		if (disposed || ctx !== currentCtx) return;
+		// A probe started before a model switch must not overwrite the new provider's quota.
+		if (disposed || generation !== sessionGeneration || provider !== currentCtx?.model?.provider) return;
 		updateSubscriptionUsage(usage);
 	}
 
@@ -603,6 +702,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		gitRefreshInFlight = true;
+		const generation = sessionGeneration;
 		try {
 			const cwd = ctx.cwd;
 			const configResult = await pi.exec(
@@ -610,7 +710,7 @@ export default function (pi: ExtensionAPI) {
 				["config", "--local", "--get", "filter.git-crypt.clean"],
 				{ cwd, timeout: GIT_COMMAND_TIMEOUT_MS },
 			).catch(() => undefined);
-			if (disposed || ctx !== currentCtx) return;
+			if (disposed || generation !== sessionGeneration) return;
 			const dirtyOnly = configResult?.code === 0 && Boolean(configResult.stdout.trim());
 
 			const statusPromise = pi.exec(
@@ -627,7 +727,7 @@ export default function (pi: ExtensionAPI) {
 				).catch(() => undefined);
 			const [statusResult, diffResult] = await Promise.all([statusPromise, diffPromise]);
 
-			if (disposed || ctx !== currentCtx) return;
+			if (disposed || generation !== sessionGeneration) return;
 			const valid = statusResult?.code === 0 && (dirtyOnly || diffResult?.code === 0);
 			const parsed = valid ? parseGitShortstat(diffResult?.stdout ?? "") : { added: 0, removed: 0 };
 			gitAdded = parsed.added;
@@ -642,11 +742,11 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function currentModelLabel(): string {
+	function currentModelLabelSegments(): LabelSegment[] {
 		const model = currentCtx?.model;
-		if (!model) return "";
+		if (!model) return [];
 		const fastModeActive = extensionFastModeActive ?? lastRequestUsedFastMode;
-		return formatModelLabel(model.id, pi.getThinkingLevel(), fastModeActive);
+		return modelLabelSegments(model.id, pi.getThinkingLevel(), fastModeActive);
 	}
 
 	function syncExtensionStatuses(footerData: ReadonlyFooterDataProvider): string[] {
@@ -757,6 +857,7 @@ export default function (pi: ExtensionAPI) {
 
 	function install(ctx: ExtensionContext) {
 		if (!ctx.hasUI || !enabled) return;
+		sessionGeneration++;
 		currentCtx = ctx;
 		firstUserText = null;
 		lastRequestUsedFastMode = false;
@@ -796,14 +897,53 @@ export default function (pi: ExtensionAPI) {
 			const editor = previousFactory?.(tui, theme, keybindings)
 				?? new CustomEditor(tui, theme, keybindings, { paddingX: EDITOR_GUTTER_WIDTH });
 			const renderEditor = editor.render.bind(editor);
+			const handleEditorMouse = editor.handleMouse?.bind(editor);
+			const actionHandlers = "actionHandlers" in editor && editor.actionHandlers instanceof Map
+				? editor.actionHandlers as Map<AppKeybinding, () => void>
+				: undefined;
 			const setPaddingX = editor.setPaddingX?.bind(editor);
 			if (setPaddingX) {
 				editor.setPaddingX = (padding) => setPaddingX(Math.max(EDITOR_GUTTER_WIDTH, padding));
 				editor.setPaddingX(EDITOR_GUTTER_WIDTH);
 			}
+			let chromeLayout: ChromeLayout | null = null;
+			let hotspotPressed = false;
+
+			function chromeAction(layout: ChromeLayout, event: TuiMouseEvent): (() => void) | undefined {
+				if (event.button !== "left") return undefined;
+				const target = chromeTargetAt(layout, event.x, event.y);
+				return target ? actionHandlers?.get(CHROME_TARGET_ACTIONS[target]) : undefined;
+			}
+
+			editor.handleMouse = (event: TuiMouseEvent): TuiMouseEventResult | undefined => {
+				const layout = chromeLayout;
+				if (!editorActive || !layout || layout.width !== event.width) return handleEditorMouse?.(event);
+
+				// Own the whole gesture from a hotspot press so the wrapped editor cannot
+				// capture it first; Pi synthesizes the click on release at the same cell.
+				if (event.type === "press" && chromeAction(layout, event)) {
+					hotspotPressed = true;
+					return { handled: true };
+				}
+				if (hotspotPressed && (event.type === "drag" || event.type === "release")) {
+					hotspotPressed = event.type === "drag";
+					return { handled: true, render: false };
+				}
+				if (event.type === "click") {
+					const action = chromeAction(layout, event);
+					if (action) {
+						action();
+						return { handled: true };
+					}
+				}
+				return handleEditorMouse?.(translateChromeMouseEvent(event, layout));
+			};
 
 			editor.render = (width: number): string[] => {
-				if (!editorActive || width < 4) return renderEditor(width);
+				if (!editorActive || width < 4) {
+					chromeLayout = null;
+					return renderEditor(width);
+				}
 
 				try {
 					const innerWidth = Math.max(1, width - 2);
@@ -814,13 +954,15 @@ export default function (pi: ExtensionAPI) {
 						: undefined;
 					const topIndicator = bottomIndex === undefined ? "" : scrollIndicator(lines[0] ?? "");
 					const bottomIndicator = bottomIndex === undefined ? "" : scrollIndicator(lines[bottomIndex] ?? "");
-					const modelLabel = currentModelLabel();
+					const labelSegments = currentModelLabelSegments();
+					const modelLabel = labelSegments.map((segment) => segment.text).join("");
 					const usageMetric = inputUsageMetric(hudTheme);
 					const topLeft = topIndicator ? hudTheme.fg("dim", ` ${topIndicator} `) : "";
 					const bottomLeft = bottomIndicator ? hudTheme.fg("dim", ` ${bottomIndicator} `) : "";
 					const topRight = modelLabel ? hudTheme.fg("accent", ` ${modelLabel} `) : "";
 					const bottomRight = usageMetric ? ` ${usageMetric} ` : "";
-					const rendered = [fitHorizontalBorder(topLeft, topRight, width, border, "╭", "╮")];
+					const top = layoutHorizontalBorder(topLeft, topRight, width, border, "╭", "╮");
+					const rendered = [top.line];
 
 					for (let i = bottomIndex === undefined ? 0 : 1; i < lines.length; i++) {
 						const line = lines[i] ?? "";
@@ -836,8 +978,17 @@ export default function (pi: ExtensionAPI) {
 						rendered.push(fitHorizontalBorder(bottomLeft, bottomRight, width, border, "╰", "╯"));
 					}
 
+					// The label sits one column after rightStart (its leading pad) and ends before the corner.
+					chromeLayout = {
+						width,
+						innerWidth,
+						bottomIndex,
+						lineCount: rendered.length,
+						hotspots: labelHotspots(labelSegments, top.rightStart + 1, top.rightStart + top.rightWidth),
+					};
 					return rendered;
 				} catch (err) {
+					chromeLayout = null;
 					if (isStaleExtensionError(err)) return renderEditor(width);
 					throw err;
 				}
@@ -861,6 +1012,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => { install(ctx); });
 	pi.on("session_shutdown", async () => {
 		unregisterAutoCompactPolicy();
+		sessionGeneration++;
 		disposed = true;
 		clearSubscriptionProbe();
 		installedEditor?.disable();
@@ -903,6 +1055,7 @@ export default function (pi: ExtensionAPI) {
 			install(ctx);
 			ctx.ui.notify("Session HUD enabled", "info");
 		} else {
+			sessionGeneration++;
 			disposed = true;
 			clearSubscriptionProbe();
 			footerTui = null;
