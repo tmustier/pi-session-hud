@@ -17,6 +17,7 @@
   "files": [
     "pi-session-hud.ts",
     "auto-compact-limit.ts",
+    "chrome-menu.ts",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

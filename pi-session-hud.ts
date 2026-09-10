@@ -32,6 +32,15 @@ import {
 	type AutoCompactPolicySnapshot,
 	type ModelIdentity,
 } from "./auto-compact-limit.js";
+import {
+	CHROME_MENU_EVENT,
+	CHROME_MENU_REQUEST_EVENT,
+	type ChromeMenu,
+	type ChromeMenuExtend,
+	type ChromeMenuItem,
+	parseChromeMenu,
+	resolveChromeMenu,
+} from "./chrome-menu.js";
 
 const FAST_MODE_STATUS_KEY = "fast-mode";
 const CONTEXT_BAR_WIDTH = 6;
@@ -51,6 +60,12 @@ const MODEL_SELECT_ACTION: AppKeybinding = "app.model.select";
 export const OTHER_MODELS_VALUE = "other";
 const POPUP_MAX_ROWS = 12;
 const POPUP_PADDING_X = 1;
+/** Hover waits this long so a pointer crossing the label does not flash a popup. */
+export const HOVER_OPEN_DELAY_MS = 120;
+/** Grace after the pointer reaches a popup edge; the cells beyond it send no events. */
+export const HOVER_LEAVE_DELAY_MS = 250;
+const MENU_TARGET_PREFIX = "menu:";
+const MENU_VALUE_SEPARATOR = "\u0000";
 /** Mirrors the descriptions in Pi's thinking selector. */
 const THINKING_LEVEL_DESCRIPTIONS: Record<string, string> = {
 	off: "No reasoning",
@@ -81,7 +96,8 @@ const CONTEXT_WARNING_LEVELS = {
 };
 
 export type ContextBand = "healthy" | "yellow" | "amber" | "red";
-export type ChromeTarget = "model" | "thinking";
+/** Built-in popups, or `menu:<id>` for one registered by another extension. */
+export type ChromeTarget = "model" | "thinking" | `menu:${string}`;
 export type LabelSegment = { text: string; target?: ChromeTarget };
 export type ChromeHotspot = { start: number; end: number; target: ChromeTarget };
 /** Geometry of the last rendered editor chrome, used to route mouse input. */
@@ -324,7 +340,22 @@ export interface LabelModel {
 	reasoning: boolean;
 }
 
-export function modelLabelSegments(model: LabelModel, thinking: string, fastModeActive: boolean): LabelSegment[] {
+export type MenuLabel = { id: string; label: string; clickable: boolean };
+
+export function menuTarget(id: string): ChromeTarget {
+	return `${MENU_TARGET_PREFIX}${id}`;
+}
+
+export function menuIdFromTarget(target: ChromeTarget): string | undefined {
+	return target.startsWith(MENU_TARGET_PREFIX) ? target.slice(MENU_TARGET_PREFIX.length) : undefined;
+}
+
+export function modelLabelSegments(
+	model: LabelModel,
+	thinking: string,
+	fastModeActive: boolean,
+	menus: readonly MenuLabel[] = [],
+): LabelSegment[] {
 	const segments: LabelSegment[] = [];
 	// Use a single-column text glyph so the TUI and terminal agree on border width.
 	if (fastModeActive) segments.push({ text: "↯ • " });
@@ -332,11 +363,14 @@ export function modelLabelSegments(model: LabelModel, thinking: string, fastMode
 	// Match Pi's footer: only reasoning models get a thinking segment, and "off" stays
 	// visible so a click can turn thinking back on.
 	if (model.reasoning) segments.push({ text: " • " }, { text: thinking === "off" ? "thinking off" : thinking, target: "thinking" });
+	for (const menu of menus) {
+		segments.push({ text: " • " }, { text: menu.label, ...(menu.clickable ? { target: menuTarget(menu.id) } : {}) });
+	}
 	return segments;
 }
 
-export function formatModelLabel(model: LabelModel, thinking: string, fastModeActive: boolean): string {
-	return modelLabelSegments(model, thinking, fastModeActive).map((segment) => segment.text).join("");
+export function formatModelLabel(model: LabelModel, thinking: string, fastModeActive: boolean, menus: readonly MenuLabel[] = []): string {
+	return modelLabelSegments(model, thinking, fastModeActive, menus).map((segment) => segment.text).join("");
 }
 
 /**
@@ -386,6 +420,26 @@ export function thinkingPopupItems(levels: readonly string[], current: string): 
 	}));
 }
 
+/** Rows contributed by another extension, namespaced so they cannot collide with built-in values. */
+export function menuPopupItems(menuId: string, items: readonly ChromeMenuItem[], current: string | undefined): SelectItem[] {
+	return items.map((item) => ({
+		value: menuItemValue(menuId, item.value),
+		label: `${item.value === current ? "✓ " : "  "}${item.label}`,
+		...(item.description !== undefined ? { description: item.description } : {}),
+	}));
+}
+
+export function menuItemValue(menuId: string, value: string): string {
+	return `${MENU_TARGET_PREFIX}${menuId}${MENU_VALUE_SEPARATOR}${value}`;
+}
+
+export function parseMenuItemValue(value: string): { menuId: string; value: string } | undefined {
+	if (!value.startsWith(MENU_TARGET_PREFIX)) return undefined;
+	const separator = value.indexOf(MENU_VALUE_SEPARATOR);
+	if (separator === -1) return undefined;
+	return { menuId: value.slice(MENU_TARGET_PREFIX.length, separator), value: value.slice(separator + 1) };
+}
+
 function widestLabel(items: readonly SelectItem[]): number {
 	return Math.max(0, ...items.map((item) => visibleWidth(item.label)));
 }
@@ -432,12 +486,17 @@ function selectListTheme(theme: PopupTheme): SelectListTheme {
 	};
 }
 
+/** Where a pointer move landed on a popup. Cells beyond the top, left and right edges send no events. */
+export type PopupPointer = "inside" | "edge";
+
 /** Framed single-column list rendered as a TUI overlay; closes itself on blur. */
 export class ChromePopup implements Component {
 	private readonly list: SelectList;
 	private readonly rows: number;
 	private closed = false;
 	private _focused = false;
+	/** Set by the owner to watch hover; the bottom edge borders the editor, which reports its own moves. */
+	onPointer: ((at: PopupPointer) => void) | undefined;
 
 	constructor(
 		private readonly title: string,
@@ -461,6 +520,10 @@ export class ChromePopup implements Component {
 
 	get focused(): boolean {
 		return this._focused;
+	}
+
+	get isClosed(): boolean {
+		return this.closed;
 	}
 
 	set focused(value: boolean) {
@@ -492,6 +555,10 @@ export class ChromePopup implements Component {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "move") {
+			this.onPointer?.(event.x === 0 || event.y === 0 || event.x === event.width - 1 ? "edge" : "inside");
+			return { handled: true, render: false };
+		}
 		const inner = event.width - 2 - 2 * POPUP_PADDING_X;
 		const x = event.x - 1 - POPUP_PADDING_X;
 		const y = event.y - 1;
@@ -807,6 +874,34 @@ export default function (pi: ExtensionAPI) {
 		pi.events.emit(AUTO_COMPACT_POLICY_REQUEST_EVENT, { protocolVersion: 1, model });
 	}
 
+	// Menus other extensions add to the input border; see chrome-menu.ts for the protocol.
+	const chromeMenus = new Map<string, ChromeMenu>();
+	const unregisterChromeMenus = pi.events.on(CHROME_MENU_EVENT, (data) => {
+		const menu = parseChromeMenu(data);
+		if (!menu) return;
+		if ("remove" in menu) chromeMenus.delete(menu.id);
+		else chromeMenus.set(menu.id, menu);
+		requestChromeRender();
+	});
+
+	function chromeMenuLabels(): MenuLabel[] {
+		const labels: MenuLabel[] = [];
+		for (const menu of chromeMenus.values()) {
+			if (menu.label) labels.push({ id: menu.id, label: menu.label, clickable: typeof menu.items === "function" || (menu.items?.length ?? 0) > 0 });
+		}
+		return labels;
+	}
+
+	function chromeMenuExtensions(extend: ChromeMenuExtend): SelectItem[] {
+		const items: SelectItem[] = [];
+		for (const menu of chromeMenus.values()) {
+			if (menu.extend !== extend) continue;
+			const resolved = resolveChromeMenu(menu);
+			items.push(...menuPopupItems(menu.id, resolved.items, resolved.current));
+		}
+		return items;
+	}
+
 	function isStaleExtensionError(err: unknown): boolean {
 		const message = err instanceof Error ? err.message : String(err ?? "");
 		return message.includes("stale after session replacement");
@@ -914,7 +1009,7 @@ export default function (pi: ExtensionAPI) {
 		const model = currentCtx?.model;
 		if (!model) return [];
 		const fastModeActive = extensionFastModeActive ?? lastRequestUsedFastMode;
-		return modelLabelSegments(model, pi.getThinkingLevel(), fastModeActive);
+		return modelLabelSegments(model, pi.getThinkingLevel(), fastModeActive, chromeMenuLabels());
 	}
 
 	function syncExtensionStatuses(footerData: ReadonlyFooterDataProvider): string[] {
@@ -1032,6 +1127,7 @@ export default function (pi: ExtensionAPI) {
 		extensionFastModeActive = null;
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
+		pi.events.emit(CHROME_MENU_REQUEST_EVENT, { protocolVersion: 1 });
 
 		disposed = false;
 		gitRefreshPending = false;
@@ -1059,6 +1155,8 @@ export default function (pi: ExtensionAPI) {
 
 		const previousFactory = ctx.ui.getEditorComponent();
 		let editorActive = true;
+		// Set by the editor factory so disabling the chrome also takes its popup down.
+		let dismissPopup: (() => void) | null = null;
 		const editorFactory: EditorFactory = (tui, theme, keybindings) => {
 			editorTui = tui;
 			const hudTheme = ctx.ui.theme;
@@ -1076,10 +1174,74 @@ export default function (pi: ExtensionAPI) {
 			}
 			let chromeLayout: ChromeLayout | null = null;
 			let hotspotPressed = false;
-			let activePopup: { target: ChromeTarget; close: () => void } | null = null;
+			// A hover popup shows without focus and follows the pointer; a click on its label
+			// pins it (focus, keyboard navigation) until it is dismissed.
+			let activePopup: { target: ChromeTarget; pinned: boolean; close: () => void; pin: () => void } | null = null;
+			let hoverOpen: { target: ChromeTarget; timer: ReturnType<typeof setTimeout> } | undefined;
+			let hoverLeaveTimer: ReturnType<typeof setTimeout> | undefined;
 
 			function chromeTargetForEvent(layout: ChromeLayout, event: TuiMouseEvent): ChromeTarget | undefined {
 				return event.button === "left" ? chromeTargetAt(layout, event.x, event.y) : undefined;
+			}
+
+			function cancelHoverOpen() {
+				if (hoverOpen) clearTimeout(hoverOpen.timer);
+				hoverOpen = undefined;
+			}
+
+			function cancelHoverLeave() {
+				if (hoverLeaveTimer !== undefined) clearTimeout(hoverLeaveTimer);
+				hoverLeaveTimer = undefined;
+			}
+
+			function closeHoverPopup() {
+				cancelHoverLeave();
+				if (activePopup && !activePopup.pinned) activePopup.close();
+			}
+
+			function launchPopup(target: ChromeTarget, event: TuiMouseEvent, layout: ChromeLayout, pinned: boolean) {
+				// Nothing awaits a mouse handler, so report failures instead of leaking a rejection.
+				openChromePopup(target, event, layout, pinned).catch((err: unknown) => {
+					if (!isStaleExtensionError(err)) currentCtx?.ui.notify(err instanceof Error ? err.message : String(err), "error");
+				});
+			}
+
+			/** Pointer moved over the editor: open, swap or dismiss hover popups. */
+			function handleChromeHover(target: ChromeTarget | undefined, event: TuiMouseEvent, layout: ChromeLayout) {
+				if (!target) {
+					cancelHoverOpen();
+					closeHoverPopup();
+					return;
+				}
+				cancelHoverLeave();
+				if (activePopup?.pinned) return;
+				if (activePopup?.target === target) {
+					cancelHoverOpen();
+					return;
+				}
+				if (hoverOpen?.target === target) return;
+				cancelHoverOpen();
+				// Another extension's dialog may be up; hovering must not stack a popup on it.
+				if (!activePopup && tui.hasOverlay()) return;
+				const timer = setTimeout(() => {
+					hoverOpen = undefined;
+					if (!editorActive || !chromeLayout || activePopup?.pinned) return;
+					activePopup?.close();
+					launchPopup(target, event, layout, false);
+				}, HOVER_OPEN_DELAY_MS);
+				hoverOpen = { target, timer };
+			}
+
+			/** Pointer moved over the popup itself; only its top, left and right edges lead off-screen for us. */
+			function handlePopupPointer(at: PopupPointer) {
+				cancelHoverOpen();
+				cancelHoverLeave();
+				if (at === "edge" && activePopup && !activePopup.pinned) {
+					hoverLeaveTimer = setTimeout(() => {
+						hoverLeaveTimer = undefined;
+						closeHoverPopup();
+					}, HOVER_LEAVE_DELAY_MS);
+				}
 			}
 
 			function openAllModelsSelector() {
@@ -1093,40 +1255,36 @@ export default function (pi: ExtensionAPI) {
 				selector?.setScope?.("all");
 			}
 
-			async function openChromePopup(target: ChromeTarget, event: TuiMouseEvent, layout: ChromeLayout): Promise<void> {
-				const ctx = currentCtx;
-				const model = ctx?.model;
-				if (!ctx || !model) return;
-				const scoped = ctx.scopedModels;
-				if (target === "model" && scoped.length === 0) {
-					// No scope configured: Pi's selector already opens on all models.
-					actionHandlers?.get(MODEL_SELECT_ACTION)?.();
-					return;
+			type PopupSpec = { title: string; items: SelectItem[]; preselect: string | undefined };
+
+			function popupSpec(target: ChromeTarget, ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>): PopupSpec | undefined {
+				const menuId = menuIdFromTarget(target);
+				if (menuId !== undefined) {
+					const menu = chromeMenus.get(menuId);
+					if (!menu) return undefined;
+					const resolved = resolveChromeMenu(menu);
+					if (resolved.items.length === 0) return undefined;
+					return {
+						title: menu.title ?? menu.label ?? menu.id,
+						items: menuPopupItems(menu.id, resolved.items, resolved.current),
+						preselect: resolved.current === undefined ? undefined : menuItemValue(menu.id, resolved.current),
+					};
 				}
 				const thinking = pi.getThinkingLevel();
-				const items = target === "model"
-					? modelPopupItems(scoped, model)
+				const builtIn: ChromeMenuExtend = target === "model" ? "model" : "thinking";
+				const items = builtIn === "model"
+					? modelPopupItems(ctx.scopedModels, model)
 					: thinkingPopupItems(getSupportedThinkingLevels(model), thinking);
-				const preselect = target === "model" ? modelKey(model) : thinking;
-				const width = popupWidth(items, tui.terminal.columns);
-				const { row, col } = popupPosition(event, layout.width, { width, height: popupRows(items.length) + 2 }, tui.terminal);
-				const border = editor.borderColor?.bind(editor) ?? ((text: string) => hudTheme.fg("accent", text));
+				items.push(...chromeMenuExtensions(builtIn));
+				return { title: builtIn === "model" ? "Model" : "Thinking", items, preselect: builtIn === "model" ? modelKey(model) : thinking };
+			}
 
-				let popup: ChromePopup | undefined;
-				const choice = ctx.ui.custom<string | undefined>((_tui, _theme, _keybindings, done) => {
-					popup = new ChromePopup(target === "model" ? "Model" : "Thinking", items, preselect, border, hudTheme, done);
-					return popup;
-				}, { overlay: true, overlayOptions: { row, col, width } });
-				const opened = { target, close: () => popup?.close(undefined) };
-				activePopup = opened;
-				let value: string | undefined;
-				try {
-					value = await choice;
-				} finally {
-					if (activePopup === opened) activePopup = null;
+			async function applyPopupChoice(target: ChromeTarget, value: string, ctx: ExtensionContext): Promise<void> {
+				const contributed = parseMenuItemValue(value);
+				if (contributed) {
+					await chromeMenus.get(contributed.menuId)?.onSelect?.(contributed.value);
+					return;
 				}
-				if (value === undefined) return;
-
 				if (target === "thinking") {
 					pi.setThinkingLevel(value as ThinkingLevel);
 					return;
@@ -1135,7 +1293,7 @@ export default function (pi: ExtensionAPI) {
 					openAllModelsSelector();
 					return;
 				}
-				const picked = scoped.find((entry) => modelKey(entry.model) === value);
+				const picked = ctx.scopedModels.find((entry) => modelKey(entry.model) === value);
 				if (!picked) return;
 				if (!(await pi.setModel(picked.model))) {
 					ctx.ui.notify(`No credentials configured for ${picked.model.provider}`, "error");
@@ -1143,6 +1301,47 @@ export default function (pi: ExtensionAPI) {
 				}
 				// A scope entry like provider/id:high carries its own level, as Pi's model cycling applies it.
 				if (picked.thinkingLevel) pi.setThinkingLevel(picked.thinkingLevel);
+			}
+
+			async function openChromePopup(target: ChromeTarget, event: TuiMouseEvent, layout: ChromeLayout, pinned: boolean): Promise<void> {
+				const ctx = currentCtx;
+				const model = ctx?.model;
+				if (!ctx || !model) return;
+				if (target === "model" && ctx.scopedModels.length === 0) {
+					// No scope configured: Pi's selector already opens on all models. Only a click goes there.
+					if (pinned) actionHandlers?.get(MODEL_SELECT_ACTION)?.();
+					return;
+				}
+				const spec = popupSpec(target, ctx, model);
+				if (!spec) return;
+				const width = popupWidth(spec.items, tui.terminal.columns);
+				const { row, col } = popupPosition(event, layout.width, { width, height: popupRows(spec.items.length) + 2 }, tui.terminal);
+				const border = editor.borderColor?.bind(editor) ?? ((text: string) => hudTheme.fg("accent", text));
+
+				let popup: ChromePopup | undefined;
+				const choice = ctx.ui.custom<string | undefined>((_tui, _theme, _keybindings, done) => {
+					popup = new ChromePopup(spec.title, spec.items, spec.preselect, border, hudTheme, done);
+					popup.onPointer = handlePopupPointer;
+					return popup;
+				}, { overlay: true, overlayOptions: { row, col, width, nonCapturing: !pinned } });
+				const opened = {
+					target,
+					pinned,
+					close: () => popup?.close(undefined),
+					pin: () => {
+						opened.pinned = true;
+						cancelHoverLeave();
+						if (popup) tui.setFocus(popup);
+					},
+				};
+				activePopup = opened;
+				let value: string | undefined;
+				try {
+					value = await choice;
+				} finally {
+					if (activePopup === opened) activePopup = null;
+				}
+				if (value !== undefined) await applyPopupChoice(target, value, ctx);
 			}
 
 			editor.handleMouse = (event: TuiMouseEvent): TuiMouseEventResult | undefined => {
@@ -1159,24 +1358,43 @@ export default function (pi: ExtensionAPI) {
 					hotspotPressed = event.type === "drag";
 					return { handled: true, render: false };
 				}
-				if (event.type === "click") {
+				if (event.type === "move") {
+					const target = chromeTargetAt(layout, event.x, event.y);
+					handleChromeHover(target, event, layout);
+					if (target) return { handled: true, render: false };
+				} else if (event.type === "click") {
 					const target = chromeTargetForEvent(layout, event);
 					if (target) {
+						cancelHoverOpen();
 						// A hotspot press does not move focus, so an open popup survives until here:
-						// the same label toggles it closed, the other label swaps popups.
+						// a hover popup pins, a pinned one toggles closed, the other label swaps.
 						const open = activePopup;
-						open?.close();
-						if (open?.target !== target) {
-							// Nothing awaits a mouse handler, so report failures instead of leaking a rejection.
-							openChromePopup(target, event, layout).catch((err: unknown) => {
-								if (!isStaleExtensionError(err)) currentCtx?.ui.notify(err instanceof Error ? err.message : String(err), "error");
-							});
+						if (open?.target === target && !open.pinned) {
+							open.pin();
+							return { handled: true };
 						}
+						open?.close();
+						if (open?.target !== target) launchPopup(target, event, layout, true);
 						return { handled: true };
 					}
 				}
 				return handleEditorMouse?.(translateChromeMouseEvent(event, layout));
 			};
+
+			dismissPopup = () => {
+				cancelHoverOpen();
+				cancelHoverLeave();
+				activePopup?.close();
+			};
+
+			// Typing while a hover popup is up means the pointer merely rests there; get out of the way.
+			const handleEditorInput = editor.handleInput.bind(editor);
+			editor.handleInput = (data: string) => {
+				cancelHoverOpen();
+				closeHoverPopup();
+				return handleEditorInput(data);
+			};
+
 
 			editor.render = (width: number): string[] => {
 				if (!editorActive || width < 4) {
@@ -1237,7 +1455,10 @@ export default function (pi: ExtensionAPI) {
 		installedEditor = {
 			factory: editorFactory,
 			previousFactory,
-			disable: () => { editorActive = false; },
+			disable: () => {
+				editorActive = false;
+				dismissPopup?.();
+			},
 		};
 		ctx.ui.setEditorComponent(editorFactory);
 	}
@@ -1251,6 +1472,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => { install(ctx); });
 	pi.on("session_shutdown", async () => {
 		unregisterAutoCompactPolicy();
+		unregisterChromeMenus();
 		sessionGeneration++;
 		disposed = true;
 		clearSubscriptionProbe();

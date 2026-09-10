@@ -26,10 +26,12 @@ The footer line, left to right:
 The editor border:
 
 - top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when fast mode is active, the single-column lightning symbol `↯` appears first. Like Pi's own footer, reasoning models show `thinking off` when thinking is off, and models without thinking support show only the model id
-- in Pi's fullscreen TUI mode (`--tui-mode fullscreen` or the `tuiMode` setting), both labels are clickable and open a small popup above the input box:
-  - the model id lists the session's scoped models (`--models` or the `enabledModels` setting, the same set as `/scoped-models`) with the current one checked, plus `Other…`, which opens Pi's full model selector on the all scope; with no scope configured the click goes straight to Pi's selector
+- in Pi's fullscreen TUI mode (`--tui-mode fullscreen` or the `tuiMode` setting), both labels open a small popup above the input box:
+  - the model id lists the session's scoped models (`--models` or the `enabledModels` setting, the same set as `/scoped-models`) with the current one checked, plus `Other…`, which opens Pi's full model selector on the all scope; with no scope configured a click goes straight to Pi's selector
   - the thinking level lists the levels the current model supports, with the current one checked
-  - pick with a click or the arrow keys and Enter; Escape, clicking the same label again, or clicking anywhere else that takes focus closes the popup
+  - hovering a label shows its popup without taking focus: click a row to pick, or keep typing and it gets out of the way; it follows the pointer to the other label and closes when the pointer leaves
+  - clicking a label pins the popup: the arrow keys and Enter work, and it stays until you pick, press Escape, click the label again, or click anywhere else that takes focus
+- other extensions can add their own labels and popup rows next to these; see [Chrome menus for other extensions](#chrome-menus-for-other-extensions)
 - bottom right: `44% left` weekly subscription quota, or session cost (`$0.042`) when using API-key billing
 - one-column input gutter with word wrapping inside a full rounded border; scroll indicators (`↑ 3 more`) stay visible in the border
 
@@ -92,7 +94,41 @@ The HUD and auto-compact communicate through Pi's shared extension event bus. Th
 
 Git state refreshes at session start and after each agent run, not while idle.
 
-Mouse clicks are only delivered in Pi's fullscreen TUI mode; in regular mode the terminal owns the scrollback and Pi does not capture mouse input.
+Mouse clicks are only delivered in Pi's fullscreen TUI mode; in regular mode the terminal owns the scrollback and Pi does not capture mouse input. Hover needs pointer-motion reporting, which Pi turns off inside tmux, zellij and screen to keep those multiplexers responsive; there the popups still open on click.
+
+## Chrome menus for other extensions
+
+An extension can put its own label in the input border, with a popup, or append rows to the model or thinking popup. It talks to the HUD over Pi's extension event bus, so neither extension imports the other and load order does not matter. `chrome-menu.ts` exports the event names and types.
+
+```ts
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const REQUEST = "pi-session-hud:chrome-menu-request:v1";
+const MENU = "pi-session-hud:chrome-menu:v1";
+
+export default function (pi: ExtensionAPI) {
+	let mode = "high";
+	const publish = () => pi.events.emit(MENU, {
+		protocolVersion: 1,
+		id: "pi-dial",                 // stable key; re-emitting replaces the menu
+		label: `dial ${mode}`,         // border segment, after the thinking level
+		title: "Dial mode",            // popup title (defaults to the label)
+		items: [                       // popup rows, or a function called when the popup opens
+			{ value: "medium", label: "medium", description: "balanced" },
+			{ value: "ultra", label: "ultra", description: "everything" },
+		],
+		current: () => mode,           // row shown with a check mark
+		onSelect: (value: string) => { mode = value; publish(); },
+	});
+	pi.events.on(REQUEST, publish);  // the HUD asks on install, in case it loaded after you
+	pi.on("session_start", async () => { publish(); });
+}
+```
+
+- a label without `items` is informational: it is drawn but not clickable
+- `extend: "model"` or `extend: "thinking"` appends the rows to that built-in popup instead; `onSelect` still receives the row's own `value`
+- `{ protocolVersion: 1, id, remove: true }` withdraws a menu
+- malformed payloads are ignored; the HUD re-renders the border whenever a menu changes
 
 On narrow terminals the footer collapses gracefully: context + repo/branch/diff survive first, then the session label; the right-side reset detail shrinks to just the countdown (`3d04h`) and then disappears.
 
