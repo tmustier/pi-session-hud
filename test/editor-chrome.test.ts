@@ -872,12 +872,13 @@ test("the quota label on the bottom border opens a read-only usage popup on hove
 		// " 63% left " is 10 columns wide, so the label spans columns 50-57 of the bottom border.
 		editor.handleMouse(hover(49, 2));
 		assert.deepEqual(hud.forwarded.map((event) => [event.x, event.y]), [[48, 2]], "the border itself is not a hotspot");
-		assert.deepEqual(editor.handleMouse(hover(52, 2)), { handled: true, render: false });
+		assert.deepEqual(editor.handleMouse(mouse({ type: "move", button: "none", x: 52, y: 2, screenX: 55, screenY: 30 })), { handled: true, render: false });
 		await wait(HOVER_OPEN_DELAY_MS + 20);
 		assert.equal(hud.popups.length, 1);
 		const { component, options } = hud.popups[0]!;
-		const overlay = (options as { overlayOptions: { width: number; nonCapturing: boolean } }).overlayOptions;
+		const overlay = (options as { overlayOptions: { row: number; width: number; nonCapturing: boolean } }).overlayOptions;
 		assert.equal(overlay.nonCapturing, true);
+		assert.equal(overlay.row, 26, "the four-row popup ends directly above the usage label");
 		assert.equal(fakeTui.focused, hud.fakeEditor);
 		const rows = component.render(overlay.width).map(strip);
 		assert.equal(rows.length, 4);
