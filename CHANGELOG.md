@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Open the model and thinking popups on hover as well as click. A hover popup takes no focus, so typing keeps going to the editor and dismisses it; it follows the pointer between labels and closes when the pointer leaves. Clicking the label pins it for keyboard navigation. Hover needs pointer-motion reporting, which Pi disables under tmux, zellij and screen.
+- Let other extensions add menus to the input border over `pi.events` (`chrome-menu.ts`): a label with its own popup, an informational label, or rows appended to the model or thinking popup. The HUD asks for menus when it installs, so load order does not matter.
+- Close an open popup when the HUD is turned off or the session shuts down.
 - Make the model id and thinking level in the input border clickable in Pi's fullscreen TUI mode. Each opens a popup above the input box: the model popup lists the session's scoped models plus `Other…`, which opens Pi's full model selector on the all scope (or goes straight there when no scope is configured); the thinking popup lists the levels the current model supports. Popups close on selection, Escape, a second click on the label, or any click that moves focus.
 - Show `thinking off` on reasoning models instead of dropping the thinking segment, so a click can turn thinking back on; models without thinking support show only the model id, matching Pi's footer.
 - Forward other mouse input to the wrapped editor in its own coordinate space so click-to-position, drag selection, and autocomplete clicks keep working inside the HUD frame.

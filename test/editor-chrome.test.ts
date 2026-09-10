@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
+import { CHROME_MENU_EVENT, CHROME_MENU_REQUEST_EVENT, parseChromeMenu } from "../chrome-menu.js";
 import sessionHud, {
 	type ChromeLayout,
 	ChromePopup,
 	chromeTargetAt,
 	codexAccountIdFromToken,
+	HOVER_LEAVE_DELAY_MS,
+	HOVER_OPEN_DELAY_MS,
 	labelHotspots,
 	modelLabelSegments,
 	modelPopupItems,
@@ -20,7 +23,16 @@ const fakeTui = {
 	requestRender() {},
 	terminal: { columns: 120, rows: 40 },
 	focused: null as unknown,
+	overlays: 0,
 	getFocusedComponent() { return this.focused; },
+	setFocus(component: unknown) {
+		const previous = this.focused as { focused?: boolean } | null;
+		if (previous && "focused" in previous) previous.focused = false;
+		this.focused = component;
+		const next = component as { focused?: boolean } | null;
+		if (next && "focused" in next) next.focused = true;
+	},
+	hasOverlay() { return this.overlays > 0; },
 };
 
 function mouse(overrides: Partial<TuiMouseEvent>): TuiMouseEvent {
@@ -142,15 +154,27 @@ function installHud(
 			forwarded.push(event);
 			return event.type === "press" ? (options.capturePress ? { handled: true, capture: true } : undefined) : { handled: true, focus: true };
 		},
-		handleInput() {},
+		handleInput(_data: string) {},
 		invalidate() {},
 		getText: () => "",
 		setText() {},
 	};
 	let editorFactory: ((tui: unknown, theme: unknown, keybindings: unknown) => typeof fakeEditor) | undefined;
+	const busHandlers = new Map<string, Array<(data: unknown) => void>>();
+	const emitted: string[] = [];
+	const bus = {
+		on: (channel: string, handler: (data: unknown) => void) => {
+			busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
+			return () => busHandlers.set(channel, (busHandlers.get(channel) ?? []).filter((h) => h !== handler));
+		},
+		emit: (channel: string, data: unknown) => {
+			emitted.push(channel);
+			for (const handler of busHandlers.get(channel) ?? []) handler(data);
+		},
+	};
 	const pi = {
 		on: (event: string, handler: Handler) => { handlers.set(event, [...(handlers.get(event) ?? []), handler]); },
-		events: { on: () => () => {}, emit() {} },
+		events: bus,
 		exec: async () => ({ code: 1, stdout: "", stderr: "" }),
 		registerCommand() {},
 		getThinkingLevel: () => thinking,
@@ -181,8 +205,16 @@ function installHud(
 			setEditorComponent: (factory: typeof editorFactory) => { editorFactory = factory; },
 			custom: (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: string | undefined) => void) => ChromePopup, opts: unknown) =>
 				new Promise<string | undefined>((resolve) => {
-					const component = factory(fakeTui, {}, {}, (value) => { component.focused = false; resolve(value); });
-					component.focused = true;
+					// Like Pi: an overlay takes focus unless nonCapturing, and hiding it restores the editor.
+					const preFocus = fakeTui.focused;
+					const component = factory(fakeTui, {}, {}, (value) => {
+						fakeTui.overlays--;
+						if (fakeTui.focused === component) fakeTui.setFocus(preFocus);
+						else component.focused = false;
+						resolve(value);
+					});
+					fakeTui.overlays++;
+					if (!(opts as { overlayOptions?: { nonCapturing?: boolean } }).overlayOptions?.nonCapturing) fakeTui.setFocus(component);
 					popups.push({ component, options: opts });
 				}),
 		},
@@ -197,7 +229,7 @@ function installHud(
 		model = next;
 		await fire("model_select");
 	};
-	return { fire, selectModel, editorFactory: () => editorFactory!, fakeEditor, actions, forwarded, popups, changes, notices };
+	return { fire, selectModel, editorFactory: () => editorFactory!, fakeEditor, actions, forwarded, popups, changes, notices, bus, emitted };
 }
 
 const strip = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -253,7 +285,7 @@ test("clicking the model id with a scope pops up the scoped models above the fra
 
 		const { component, options } = hud.popups[0]!;
 		const width = popupWidth(modelPopupItems([{ model: scopedFable, thinkingLevel: "high" as never }, { model: scopedAstra }] as never, undefined), 120);
-		assert.deepEqual(options, { overlay: true, overlayOptions: { row: 30 - 5, col: 3 + 60 - width, width } });
+		assert.deepEqual(options, { overlay: true, overlayOptions: { row: 30 - 5, col: 3 + 60 - width, width, nonCapturing: false } });
 		const rows = component.render(width).map(strip);
 		assert.equal(rows.length, 5);
 		assert.match(rows[0]!, /^╭ Model ─+╮$/);
@@ -369,6 +401,8 @@ test("clicking the open popup's label closes it and the other label swaps popups
 		assert.deepEqual(hud.changes, []);
 	} finally {
 		await hud.fire("session_shutdown");
+		// Tearing the chrome down takes an open popup with it.
+		assert.equal(hud.popups[2]!.component.isClosed, true);
 	}
 });
 
@@ -523,6 +557,280 @@ test("a model without thinking support only exposes the model hotspot", async ()
 		assert.deepEqual(hud.actions, ["model"]);
 		assert.equal(hud.popups.length, 0);
 		assert.equal(hud.forwarded.length, 1);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const hover = (x: number, y = 0) => mouse({ type: "move", button: "none", x, y });
+
+test("hovering a label opens its popup without taking focus; a click then pins it", async () => {
+	const hud = installHud("medium", { scoped: [{ model: scopedFable }] });
+	await hud.fire("session_start");
+	fakeTui.focused = hud.fakeEditor;
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		editor.render(60);
+		assert.deepEqual(editor.handleMouse(hover(40)), { handled: true, render: false });
+		assert.equal(hud.popups.length, 0);
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(hud.popups.length, 1);
+		const { component, options } = hud.popups[0]!;
+		assert.equal((options as { overlayOptions: { nonCapturing: boolean } }).overlayOptions.nonCapturing, true);
+		assert.equal(component.focused, false);
+		assert.equal(fakeTui.focused, hud.fakeEditor);
+
+		// Resting on the label does not reopen or re-render anything.
+		editor.handleMouse(hover(41));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(hud.popups.length, 1);
+
+		editor.handleMouse(mouse({ x: 41, y: 0 }));
+		await settle();
+		assert.equal(hud.popups.length, 1);
+		assert.equal(component.focused, true);
+		assert.equal(fakeTui.focused, component);
+
+		// Pinned: moving over the editor no longer dismisses it; keys navigate the list.
+		editor.handleMouse(hover(10, 1));
+		await settle();
+		assert.equal(component.focused, true);
+		component.handleInput("\r");
+		await settle();
+		assert.deepEqual(hud.changes, ["model:anthropic/claude-fable-5"]);
+		assert.equal(fakeTui.focused, hud.fakeEditor);
+	} finally {
+		fakeTui.focused = null;
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("a pointer merely crossing the label does not flash a popup", async () => {
+	const hud = installHud("medium", { scoped: [{ model: scopedFable }] });
+	await hud.fire("session_start");
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		editor.render(60);
+		editor.handleMouse(hover(40));
+		editor.handleMouse(hover(20));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(hud.popups.length, 0);
+		// Moves elsewhere still reach the editor, translated like clicks.
+		assert.deepEqual(hud.forwarded.map((event) => [event.type, event.x]), [["move", 19]]);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("a hover popup follows the pointer: swaps on the other label, closes on the editor, the popup's edge, or a keypress", async () => {
+	const hud = installHud("medium", { scoped: [{ model: scopedFable }] });
+	await hud.fire("session_start");
+	fakeTui.focused = hud.fakeEditor;
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		editor.render(60);
+		const open = async (x: number) => {
+			editor.handleMouse(hover(x));
+			await wait(HOVER_OPEN_DELAY_MS + 20);
+			return hud.popups[hud.popups.length - 1]!.component;
+		};
+		const closedCount = () => hud.popups.filter((popup) => popup.component.isClosed).length;
+
+		const model = await open(40);
+		const thinking = await open(55);
+		assert.equal(hud.popups.length, 2);
+		assert.equal(model.isClosed, true);
+		assert.match(strip(thinking.render(50)[0]!), /Thinking/);
+
+		editor.handleMouse(hover(10, 1));
+		assert.equal(thinking.isClosed, true);
+
+		// Edge cells lead off-screen, where no events reach us: close after a grace period
+		// unless the pointer comes back inside.
+		const edgy = await open(40);
+		edgy.handleMouse(mouse({ type: "move", button: "none", x: 0, y: 2, width: 40, height: 5 }));
+		edgy.handleMouse(mouse({ type: "move", button: "none", x: 5, y: 2, width: 40, height: 5 }));
+		await wait(HOVER_LEAVE_DELAY_MS + 20);
+		assert.equal(edgy.isClosed, false);
+		edgy.handleMouse(mouse({ type: "move", button: "none", x: 5, y: 0, width: 40, height: 5 }));
+		await wait(HOVER_LEAVE_DELAY_MS + 20);
+		assert.equal(edgy.isClosed, true);
+
+		const typed = await open(40);
+		editor.handleInput("x");
+		assert.equal(typed.isClosed, true);
+		assert.equal(closedCount(), hud.popups.length);
+		assert.equal(fakeTui.focused, hud.fakeEditor);
+		assert.deepEqual(hud.changes, []);
+	} finally {
+		fakeTui.focused = null;
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("hover does not stack a popup on another extension's overlay, and never opens Pi's selector", async () => {
+	const hud = installHud("medium");
+	await hud.fire("session_start");
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		editor.render(60);
+		// No scope: a click goes to Pi's selector, but hovering must not.
+		editor.handleMouse(hover(40));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.deepEqual(hud.actions, []);
+
+		fakeTui.overlays = 1;
+		editor.handleMouse(hover(55));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(hud.popups.length, 0);
+	} finally {
+		fakeTui.overlays = 0;
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("another extension can add its own label and popup to the chrome over pi.events", async () => {
+	const hud = installHud("medium");
+	const selected: string[] = [];
+	// Registered before the HUD installs: the HUD asks for menus on install and the extension re-emits.
+	hud.bus.on(CHROME_MENU_REQUEST_EVENT, () => {
+		hud.bus.emit(CHROME_MENU_EVENT, {
+			protocolVersion: 1,
+			id: "pi-dial",
+			label: "ultra",
+			title: "Dial mode",
+			items: [
+				{ value: "medium", label: "medium", description: "balanced" },
+				{ value: "ultra", label: "ultra", description: "everything" },
+			],
+			current: "ultra",
+			onSelect: (value: string) => { selected.push(value); },
+		});
+	});
+	await hud.fire("session_start");
+	try {
+		assert.ok(hud.emitted.includes(CHROME_MENU_REQUEST_EVENT));
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		const lines = editor.render(60);
+		assert.match(strip(lines[0]!), /─ gpt-5\.6-sol • medium • ultra ╮$/);
+
+		// " gpt-5.6-sol • medium • ultra " is 30 columns wide, so ultra starts at column 53.
+		editor.handleMouse(mouse({ x: 54, y: 0 }));
+		await settle();
+		assert.equal(hud.popups.length, 1);
+		const popup = hud.popups[0]!.component;
+		const width = (hud.popups[0]!.options as { overlayOptions: { width: number } }).overlayOptions.width;
+		const rows = popup.render(width).map(strip);
+		assert.match(rows[0]!, /^╭ Dial mode ─+╮$/);
+		assert.deepEqual(rows.slice(1, -1).map((row) => row.replace(/\s+/g, " ").trim()), [
+			"│ medium balanced │",
+			"│ → ✓ ultra everything │",
+		]);
+		popup.handleInput("\x1b[A");
+		popup.handleInput("\r");
+		await settle();
+		assert.deepEqual(selected, ["medium"]);
+		assert.deepEqual(hud.changes, []);
+
+		// Re-emitting with the same id replaces the menu; a removal drops the label.
+		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "pi-dial", label: "medium", items: [] });
+		assert.match(strip(editor.render(60)[0]!), /• medium • medium ╮$/);
+		// No rows any more: the label stays but is not a hotspot.
+		editor.handleMouse(mouse({ x: 55, y: 0 }));
+		await settle();
+		assert.equal(hud.popups.length, 1);
+		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "pi-dial", remove: true });
+		assert.match(strip(editor.render(60)[0]!), /─ gpt-5\.6-sol • medium ╮$/);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("a label without rows is informational only, and malformed menus are ignored", async () => {
+	const hud = installHud("medium");
+	await hud.fire("session_start");
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "info", label: "3 tabs" });
+		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 2, id: "future", label: "nope", items: [] });
+		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "", label: "nope" });
+		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "bad", label: 42 });
+		const line = strip(editor.render(60)[0]!);
+		assert.match(line, /─ gpt-5\.6-sol • medium • 3 tabs ╮$/);
+		assert.doesNotMatch(line, /nope/);
+		// " gpt-5.6-sol • medium • 3 tabs " is 31 columns wide, so "3 tabs" starts at column 52.
+		editor.handleMouse(mouse({ x: 54, y: 0 }));
+		await settle();
+		assert.equal(hud.popups.length, 0);
+		assert.deepEqual(hud.forwarded.map((event) => event.x), [53]);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("an extension can append rows to the built-in model popup and receives their selection", async () => {
+	const hud = installHud("medium", { scoped: [{ model: scopedFable }] });
+	await hud.fire("session_start");
+	const selected: string[] = [];
+	let mode = "high";
+	hud.bus.emit(CHROME_MENU_EVENT, {
+		protocolVersion: 1,
+		id: "pi-dial",
+		extend: "model",
+		items: () => [{ value: "ultra", label: `Mode: ${mode}`, description: "pi-dial" }],
+		current: () => mode,
+		onSelect: async (value: string) => { mode = value; selected.push(value); },
+	});
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		assert.match(strip(editor.render(60)[0]!), /─ gpt-5\.6-sol • medium ╮$/);
+		editor.handleMouse(mouse({ x: 40, y: 0 }));
+		await settle();
+		const popup = hud.popups[0]!.component;
+		const rows = popup.render(50).map(strip).slice(1, -1).map((row) => row.replace(/\s+/g, " ").trim());
+		assert.deepEqual(rows, ["│ → claude-fable-5 anthropic │", "│ Other… all models │", "│ Mode: high pi-dial │"]);
+		popup.handleInput("\x1b[B");
+		popup.handleInput("\x1b[B");
+		popup.handleInput("\r");
+		await settle();
+		assert.deepEqual(selected, ["ultra"]);
+		assert.deepEqual(hud.changes, []);
+		assert.deepEqual(hud.actions, []);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("chrome menu payloads are validated", () => {
+	assert.equal(parseChromeMenu({ protocolVersion: 1, id: "x", extend: "footer" }), undefined);
+	assert.equal(parseChromeMenu({ protocolVersion: 1, id: "x", onSelect: "nope" }), undefined);
+	assert.deepEqual(parseChromeMenu({ protocolVersion: 1, id: "x", remove: true }), { protocolVersion: 1, id: "x", remove: true });
+	const parsed = parseChromeMenu({ protocolVersion: 1, id: "x", label: "L", items: [{ value: "a", label: "A" }, { value: 1, label: "bad" }, "junk"] });
+	assert.deepEqual(parsed, { protocolVersion: 1, id: "x", label: "L", items: [{ value: "a", label: "A" }] });
+});
+
+test("a pending hover open follows the pointer to the label it ends on", async () => {
+	const hud = installHud("medium", { scoped: [{ model: scopedFable }] });
+	await hud.fire("session_start");
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		editor.render(60);
+		// Sliding from the model id onto the thinking level within the delay opens thinking, once.
+		editor.handleMouse(hover(40));
+		await wait(HOVER_OPEN_DELAY_MS / 2);
+		editor.handleMouse(hover(55));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(hud.popups.length, 1);
+		assert.match(strip(hud.popups[0]!.component.render(50)[0]!), /Thinking/);
+
+		// Sliding to the model id and back onto the open popup's label cancels the swap.
+		editor.handleMouse(hover(40));
+		await wait(HOVER_OPEN_DELAY_MS / 2);
+		editor.handleMouse(hover(55));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(hud.popups.length, 1);
+		assert.equal(hud.popups[0]!.component.isClosed, false);
 	} finally {
 		await hud.fire("session_shutdown");
 	}
