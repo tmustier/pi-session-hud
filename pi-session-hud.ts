@@ -1188,6 +1188,19 @@ export default function (pi: ExtensionAPI) {
 		return parts.filter(Boolean).join(` ${muted("•", theme)} `);
 	}
 
+	/**
+	 * Right side of the footer: the HUD's own provider detail, preceded by the extension statuses
+	 * that fit beside it, in order. Statuses are ancillary and must not push the detail out.
+	 */
+	function footerRight(statuses: string[], detail: string, left: string, width: number, theme?: HudTheme): string {
+		const room = width - visibleWidth(left) - 1;
+		const kept: string[] = [];
+		for (const status of statuses) {
+			if (visibleWidth(joinFooterDetails([...kept, status, detail], theme)) <= room) kept.push(status);
+		}
+		return joinFooterDetails([...kept, detail], theme);
+	}
+
 	function requestChromeRender() {
 		footerTui?.requestRender();
 		editorTui?.requestRender();
@@ -1231,18 +1244,14 @@ export default function (pi: ExtensionAPI) {
 			const fullLeft = sessionLabel ? `${fullLeftBase} ${sessionDivider} ${sessionLabel}` : fullLeftBase;
 			const compactLeft = sessionLabel ? `${compactLeftBase} ${sessionDivider} ${sessionLabel}` : compactLeftBase;
 			const subscriptionUsage = currentSubscriptionUsage();
-			const rightFull = joinFooterDetails([
-				...extensionStatuses,
-				formatProviderDetail(currentCtx?.model?.provider ?? "", subscriptionUsage, theme),
-			], theme);
-			const rightCompact = joinFooterDetails([
-				...extensionStatuses,
-				formatProviderDetailCompact(subscriptionUsage, theme),
-			], theme);
+			const detailFull = formatProviderDetail(currentCtx?.model?.provider ?? "", subscriptionUsage, theme);
+			const detailCompact = formatProviderDetailCompact(subscriptionUsage, theme);
+			const line = (left: string, detail: string) =>
+				fitLeftRight(left, footerRight(extensionStatuses, detail, left, width, theme), width);
 
-			if (fitsLeftRight(fullLeft, rightFull, width)) return [fitLeftRight(fullLeft, rightFull, width)];
-			if (fitsLeftRight(compactLeft, rightCompact, width)) return [fitLeftRight(compactLeft, rightCompact, width)];
-			if (fitsLeftRight(compactLeftBase, rightCompact, width)) return [fitLeftRight(compactLeftBase, rightCompact, width)];
+			if (fitsLeftRight(fullLeft, detailFull, width)) return [line(fullLeft, detailFull)];
+			if (fitsLeftRight(compactLeft, detailCompact, width)) return [line(compactLeft, detailCompact)];
+			if (fitsLeftRight(compactLeftBase, detailCompact, width)) return [line(compactLeftBase, detailCompact)];
 			if (visibleFits(compactLeft, width)) return [fitLine(compactLeft, width)];
 			if (visibleFits(compactLeftBase, width)) {
 				return sessionLabel

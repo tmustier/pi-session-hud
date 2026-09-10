@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix extension statuses pushing the HUD's own weekly reset countdown off the footer. Any overflow used to drop the whole right side, so with a few extensions that set statuses the countdown never appeared even on wide terminals. Statuses are ancillary: the countdown always stays, and the statuses that fit beside it are kept in order.
+
 ## [0.6.0] - 2026-09-10
 
 Requires Pi's fullscreen TUI mode (`--tui-mode fullscreen` or the `tuiMode` setting) for the mouse features; in regular mode Pi does not capture mouse input and the HUD behaves as before.

@@ -166,6 +166,9 @@ function installHud(
 		setText() {},
 	};
 	let editorFactory: ((tui: unknown, theme: unknown, keybindings: unknown) => typeof fakeEditor) | undefined;
+	const statuses = new Map<string, string>();
+	const footerData = { getExtensionStatuses: () => statuses, getGitBranch: () => "main", onBranchChange: () => () => {} };
+	let footerFactory: ((tui: unknown, theme: unknown, footerData: unknown) => { render(width: number): string[] }) | undefined;
 	const busHandlers = new Map<string, Array<(data: unknown) => void>>();
 	const emitted: string[] = [];
 	const bus = {
@@ -205,7 +208,7 @@ function installHud(
 		scopedModels: options.scoped ?? [],
 		ui: {
 			theme: { fg: (_color: string, text: string) => text },
-			setFooter() {},
+			setFooter: (factory: typeof footerFactory) => { footerFactory = factory; },
 			notify: (message: string) => { notices.push(message); },
 			getEditorComponent: () => () => fakeEditor,
 			setEditorComponent: (factory: typeof editorFactory) => { editorFactory = factory; },
@@ -235,7 +238,8 @@ function installHud(
 		model = next;
 		await fire("model_select");
 	};
-	return { fire, selectModel, createCtx, handlers, editorFactory: () => editorFactory!, fakeEditor, actions, forwarded, popups, changes, notices, bus, emitted };
+	const renderFooter = (width: number) => footerFactory!(fakeTui, {}, footerData).render(width).map((line) => strip(line).replace(/ +/g, " ").trim()).join("\n");
+	return { fire, selectModel, createCtx, handlers, editorFactory: () => editorFactory!, fakeEditor, actions, forwarded, popups, changes, notices, bus, emitted, statuses, renderFooter };
 }
 
 const strip = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -953,6 +957,47 @@ test("response headers feed both windows: Anthropic as 0-1 fractions, Codex by w
 		rows = hud.popups.at(-1)!.component.render(80).map(strip);
 		assert.match(rows[1]!, /^│ Weekly:  19% used \(31% ahead\) \| resets in 3d12h/);
 		assert.match(rows[2]!, /^│ 5h:      28% used \(52% ahead\) \| resets in 1h00m/);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("extension statuses yield to the weekly reset countdown instead of pushing it off the footer", async () => {
+	const hud = installHud("medium", { oauth: true });
+	await hud.fire("session_start");
+	try {
+		const ctx = hud.createCtx();
+		for (const handler of hud.handlers.get("after_provider_response") ?? []) {
+			await handler({ headers: {
+				"x-codex-primary-used-percent": "49",
+				"x-codex-primary-window-minutes": "10080",
+				"x-codex-primary-reset-at": String(Math.floor(Date.now() / 1000) + (4 * 24 + 17) * 3600 + 30 * 60),
+			} }, ctx);
+		}
+		hud.statuses.set("mcp", "🔌 MCP: 19 servers enabled");
+		hud.statuses.set("google", "Google Workspace: 2 accounts connected");
+		hud.statuses.set("micro", "micro ○ idle (offline)");
+
+		// Roomy: everything, in order.
+		assert.equal(
+			hud.renderFooter(170),
+			"░░░░░░ ? ?/272k │ /tmp (main) 🔌 MCP: 19 servers enabled • Google Workspace: 2 accounts connected • micro ○ idle (offline) • openai-codex weekly reset in 4d18h",
+		);
+		// One column short of everything: the countdown stays and the last status goes.
+		assert.equal(
+			hud.renderFooter(160),
+			"░░░░░░ ? ?/272k │ /tmp (main) 🔌 MCP: 19 servers enabled • Google Workspace: 2 accounts connected • openai-codex weekly reset in 4d18h",
+		);
+		// A status that does not fit is skipped; a later, shorter one still shows.
+		assert.equal(
+			hud.renderFooter(130),
+			"░░░░░░ ? ?/272k │ /tmp (main) 🔌 MCP: 19 servers enabled • micro ○ idle (offline) • openai-codex weekly reset in 4d18h",
+		);
+		assert.equal(hud.renderFooter(100), "░░░░░░ ? ?/272k │ /tmp (main) 🔌 MCP: 19 servers enabled • openai-codex weekly reset in 4d18h");
+		// No status fits: the HUD's own detail is still there, in full.
+		assert.equal(hud.renderFooter(70), "░░░░░░ ? ?/272k │ /tmp (main) openai-codex weekly reset in 4d18h");
+		// Compact tier: bare countdown, still ahead of any status.
+		assert.equal(hud.renderFooter(50), "░░░░░░ ? ? │ /tmp (main) 4d18h");
 	} finally {
 		await hud.fire("session_shutdown");
 	}
