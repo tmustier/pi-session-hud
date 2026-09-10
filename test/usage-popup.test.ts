@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	formatShortCountdown,
 	InfoPopup,
+	infoPopupHeight,
 	infoPopupWidth,
 	parseAnthropicSubscriptionUsagePayload,
 	parseCodexSubscriptionUsagePayload,
@@ -127,4 +129,20 @@ test("an info popup renders once per width, closes on Escape, and reports pointe
 	popup.handleInput("\x1b");
 	assert.equal(closed, 1);
 	assert.equal(popup.isClosed, true);
+});
+
+test("an info popup wraps rather than truncating at narrow widths", () => {
+	const lines = ["Weekly:  52% used (18% ahead) | resets in 4d16h"];
+	const popup = new InfoPopup("Usage", lines, (text) => text, plain as never, () => {});
+	const width = 36;
+	const rendered = popup.render(width);
+	assert.equal(rendered.length, infoPopupHeight(lines, width));
+	assert.deepEqual(rendered.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "")), [
+		"╭ Usage ───────────────────────────╮",
+		"│ Weekly:  52% used (18% ahead) |  │",
+		"│ resets in 4d16h                  │",
+		"╰──────────────────────────────────╯",
+	]);
+	assert.ok(rendered.every((line) => visibleWidth(line) === width));
+	assert.ok(rendered.every((line) => !line.includes("…")));
 });

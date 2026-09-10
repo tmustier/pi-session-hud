@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-09-10
+
+- Wrap usage-popup content at narrow terminal widths instead of truncating reset details with an ellipsis, and size the overlay to the wrapped rows.
+
 ## [0.6.3] - 2026-09-10
 
 - Keep the usage popup directly adjacent to its bottom-border hover target, so wrapped editors at narrow terminal widths no longer leave a dead gap between the label and popup.
