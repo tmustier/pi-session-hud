@@ -882,8 +882,8 @@ test("the quota label on the bottom border opens a read-only usage popup on hove
 		const rows = component.render(overlay.width).map(strip);
 		assert.equal(rows.length, 4);
 		assert.match(rows[0]!, /^╭ Usage ─+╮$/);
-		assert.equal(rows[1], "│ Weekly:  37% used (13% ahead)  | resets in 3d12h │");
-		assert.equal(rows[2], "│ 5h:      90% used (10% behind) | resets in 1h00m │");
+		assert.equal(rows[1], "│ Weekly:  37% used (13% behind) | resets in 3d12h │");
+		assert.equal(rows[2], "│ 5h:      90% used (10% ahead)  | resets in 1h00m │");
 
 		editor.handleMouse(mouse({ x: 52, y: 2 }));
 		await settle();
@@ -938,8 +938,8 @@ test("response headers feed both windows: Anthropic as 0-1 fractions, Codex by w
 		editor.handleMouse(mouse({ x: 52, y: 2 }));
 		await settle();
 		let rows = hud.popups.at(-1)!.component.render(80).map(strip);
-		assert.match(rows[1]!, /^│ Weekly:  37% used \(13% ahead\)  \| resets in 3d12h/);
-		assert.match(rows[2]!, /^│ 5h:      90% used \(10% behind\) \| resets in 1h00m/);
+		assert.match(rows[1]!, /^│ Weekly:  37% used \(13% behind\) \| resets in 3d12h/);
+		assert.match(rows[2]!, /^│ 5h:      90% used \(10% ahead\)  \| resets in 1h00m/);
 		hud.popups.at(-1)!.component.close(undefined);
 		await settle();
 
@@ -955,8 +955,8 @@ test("response headers feed both windows: Anthropic as 0-1 fractions, Codex by w
 		editor.handleMouse(mouse({ x: 52, y: 2 }));
 		await settle();
 		rows = hud.popups.at(-1)!.component.render(80).map(strip);
-		assert.match(rows[1]!, /^│ Weekly:  19% used \(31% ahead\) \| resets in 3d12h/);
-		assert.match(rows[2]!, /^│ 5h:      28% used \(52% ahead\) \| resets in 1h00m/);
+		assert.match(rows[1]!, /^│ Weekly:  19% used \(31% behind\) \| resets in 3d12h/);
+		assert.match(rows[2]!, /^│ 5h:      28% used \(52% behind\) \| resets in 1h00m/);
 	} finally {
 		await hud.fire("session_shutdown");
 	}

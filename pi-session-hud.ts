@@ -817,12 +817,12 @@ export function formatShortCountdown(resetAtMs: number, now: number): string {
 
 /**
  * How far usage sits from a straight line through the window, in percentage points:
- * positive when less has been used than the elapsed share of the window (ahead), negative when more (behind).
+ * positive when more has been used than the elapsed share of the window (ahead), negative when less (behind).
  */
 export function usagePace(window: UsageWindow, windowMs: number, now: number): number | undefined {
 	if (!window.resetAtMs) return undefined;
 	const elapsed = clamp(1 - (window.resetAtMs - now) / windowMs, 0, 1);
-	return Math.round(elapsed * 100 - window.usedPercent);
+	return Math.round(window.usedPercent - elapsed * 100);
 }
 
 type UsagePopupTheme = { fg(color: ThemeColor, text: string): string };
@@ -835,7 +835,7 @@ export function usagePopupLines(usage: SubscriptionUsage, now: number, theme: Us
 	].map(({ label, window, windowMs, countdown }) => {
 		const pace = usagePace(window, windowMs, now);
 		const paceText = pace === undefined ? "" : pace === 0 ? "on pace" : `${Math.abs(pace)}% ${pace > 0 ? "ahead" : "behind"}`;
-		const paceColor: ThemeColor = pace === undefined || pace === 0 ? "muted" : pace > 0 ? "success" : "error";
+		const paceColor: ThemeColor = pace === undefined || pace === 0 ? "muted" : pace > 0 ? "error" : "success";
 		return {
 			label,
 			used: `${String(Math.round(clamp(window.usedPercent, 0, 100))).padStart(3)}% used`,

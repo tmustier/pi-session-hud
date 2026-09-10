@@ -17,15 +17,15 @@ const tagged = { fg: (color: string, text: string) => `<${color}>${text}</${colo
 const plain = { fg: (_color: string, text: string) => text };
 
 test("pace compares usage with the elapsed share of the window", () => {
-	// Half the week gone, 38% used: 12 points in hand.
-	assert.equal(usagePace({ usedPercent: 38, resetAtMs: NOW + 3.5 * DAY }, 7 * DAY, NOW), 12);
-	// 80% of the 5-hour window gone, 90% used: 10 points over.
-	assert.equal(usagePace({ usedPercent: 90, resetAtMs: NOW + HOUR }, 5 * HOUR, NOW), -10);
+	// Half the week gone, 60% used: usage is 10 points ahead of time elapsed.
+	assert.equal(usagePace({ usedPercent: 60, resetAtMs: NOW + 3.5 * DAY }, 7 * DAY, NOW), 10);
+	// Half the week gone, 40% used: usage is 10 points behind time elapsed.
+	assert.equal(usagePace({ usedPercent: 40, resetAtMs: NOW + 3.5 * DAY }, 7 * DAY, NOW), -10);
 	assert.equal(usagePace({ usedPercent: 50, resetAtMs: NOW + 3.5 * DAY }, 7 * DAY, NOW), 0);
 	// No reset time means no pace; skewed reset times clamp to the window.
 	assert.equal(usagePace({ usedPercent: 38 }, 7 * DAY, NOW), undefined);
-	assert.equal(usagePace({ usedPercent: 10, resetAtMs: NOW + 8 * DAY }, 7 * DAY, NOW), -10);
-	assert.equal(usagePace({ usedPercent: 10, resetAtMs: NOW - HOUR }, 7 * DAY, NOW), 90);
+	assert.equal(usagePace({ usedPercent: 10, resetAtMs: NOW + 8 * DAY }, 7 * DAY, NOW), 10);
+	assert.equal(usagePace({ usedPercent: 10, resetAtMs: NOW - HOUR }, 7 * DAY, NOW), -90);
 });
 
 test("short countdowns round up to the minute and drop an empty hour", () => {
@@ -43,8 +43,8 @@ test("usage popup lines align columns and colour the pace by direction", () => {
 		fiveHour: { usedPercent: 90, resetAtMs: NOW + HOUR },
 	};
 	assert.deepEqual(usagePopupLines(usage, NOW, tagged), [
-		"Weekly:  38% used (<success>12% ahead</success>)  <muted>| resets in 3d12h</muted>",
-		"5h:      90% used (<error>10% behind</error>) <muted>| resets in 1h00m</muted>",
+		"Weekly:  38% used (<success>12% behind</success>) <muted>| resets in 3d12h</muted>",
+		"5h:      90% used (<error>10% ahead</error>)  <muted>| resets in 1h00m</muted>",
 	]);
 	assert.deepEqual(usagePopupLines({ provider: "anthropic", usedPercent: 50, resetAtMs: NOW + 3.5 * DAY }, NOW, tagged), [
 		"Weekly:  50% used (<muted>on pace</muted>) <muted>| resets in 3d12h</muted>",
