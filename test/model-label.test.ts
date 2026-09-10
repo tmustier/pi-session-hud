@@ -3,15 +3,23 @@ import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { fastModeFromExtensionStatuses, formatModelLabel, requestUsesFastMode } from "../pi-session-hud.js";
 
+const reasoningModel = { id: "gpt-5.6-sol", reasoning: true };
+const plainModel = { id: "gpt-5.6-sol", reasoning: false };
+
 test("adds a single-column text lightning glyph before the model while fast mode is active", () => {
-	const label = formatModelLabel("gpt-5.6-sol", "medium", true);
+	const label = formatModelLabel(reasoningModel, "medium", true);
 	assert.equal(label, "↯ • gpt-5.6-sol • medium");
-	assert.equal(formatModelLabel("gpt-5.6-sol", "off", true), "↯ • gpt-5.6-sol");
+	assert.equal(formatModelLabel(plainModel, "off", true), "↯ • gpt-5.6-sol");
 	assert.equal(visibleWidth(label), [...label].length);
 });
 
 test("keeps the existing model label while fast mode is inactive", () => {
-	assert.equal(formatModelLabel("gpt-5.6-sol", "medium", false), "gpt-5.6-sol • medium");
+	assert.equal(formatModelLabel(reasoningModel, "medium", false), "gpt-5.6-sol • medium");
+});
+
+test("shows thinking off on reasoning models and nothing on models without thinking", () => {
+	assert.equal(formatModelLabel(reasoningModel, "off", false), "gpt-5.6-sol • thinking off");
+	assert.equal(formatModelLabel(plainModel, "medium", false), "gpt-5.6-sol");
 });
 
 test("recognizes fast mode from extension status without depending on request-hook order", () => {
