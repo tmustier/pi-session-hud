@@ -19,6 +19,7 @@ import {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	truncateToWidth,
+	matchesKey,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import {
@@ -49,6 +50,9 @@ const EDITOR_GUTTER_WIDTH = 1;
 const FOOTER_GUTTER_WIDTH = EDITOR_GUTTER_WIDTH;
 const SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS = new Set(["openai-codex", "anthropic"]);
 const ONE_WEEK_MINUTES = 7 * 24 * 60;
+const FIVE_HOURS_MINUTES = 5 * 60;
+const ONE_WEEK_MS = ONE_WEEK_MINUTES * 60 * 1000;
+const FIVE_HOURS_MS = FIVE_HOURS_MINUTES * 60 * 1000;
 const SUBSCRIPTION_USAGE_PROBE_INTERVAL_MS = 5 * 60 * 1000;
 const SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS = 60 * 1000;
 const GIT_COMMAND_TIMEOUT_MS = 2000;
@@ -97,9 +101,9 @@ const CONTEXT_WARNING_LEVELS = {
 
 export type ContextBand = "healthy" | "yellow" | "amber" | "red";
 /** Built-in popups, or `menu:<id>` for one registered by another extension. */
-export type ChromeTarget = "model" | "thinking" | `menu:${string}`;
+export type ChromeTarget = "model" | "thinking" | "usage" | `menu:${string}`;
 export type LabelSegment = { text: string; target?: ChromeTarget };
-export type ChromeHotspot = { start: number; end: number; target: ChromeTarget };
+export type ChromeHotspot = { row: number; start: number; end: number; target: ChromeTarget };
 /** Geometry of the last rendered editor chrome, used to route mouse input. */
 export type ChromeLayout = {
 	width: number;
@@ -118,10 +122,14 @@ type InstalledEditor = {
 	previousFactory: EditorFactory | undefined;
 	disable: () => void;
 };
-type SubscriptionUsage = {
+export type UsageWindow = {
 	usedPercent: number;
-	provider: string;
 	resetAtMs?: number;
+};
+/** Weekly quota at the top level (what the border shows), plus the 5-hour window when the provider reports one. */
+export type SubscriptionUsage = UsageWindow & {
+	provider: string;
+	fiveHour?: UsageWindow;
 };
 
 type RateLimitWindowUsage = {
@@ -377,21 +385,20 @@ export function formatModelLabel(model: LabelModel, thinking: string, fastModeAc
  * Column ranges (end exclusive) of clickable label segments laid out from `start`,
  * clipped to `limit` so truncated labels only expose their visible columns.
  */
-export function labelHotspots(segments: LabelSegment[], start: number, limit: number): ChromeHotspot[] {
+export function labelHotspots(segments: LabelSegment[], row: number, start: number, limit: number): ChromeHotspot[] {
 	const hotspots: ChromeHotspot[] = [];
 	let column = start;
 	for (const segment of segments) {
 		const segmentStart = column;
 		column += visibleWidth(segment.text);
 		const end = Math.min(column, limit);
-		if (segment.target && end > segmentStart) hotspots.push({ start: segmentStart, end, target: segment.target });
+		if (segment.target && end > segmentStart) hotspots.push({ row, start: segmentStart, end, target: segment.target });
 	}
 	return hotspots;
 }
 
 export function chromeTargetAt(layout: ChromeLayout, x: number, y: number): ChromeTarget | undefined {
-	if (y !== 0) return undefined;
-	return layout.hotspots.find((hotspot) => x >= hotspot.start && x < hotspot.end)?.target;
+	return layout.hotspots.find((hotspot) => hotspot.row === y && x >= hotspot.start && x < hotspot.end)?.target;
 }
 
 // ---- Editor chrome popups ----
@@ -489,8 +496,85 @@ function selectListTheme(theme: PopupTheme): SelectListTheme {
 /** Where a pointer move landed on a popup. Cells beyond the top, left and right edges send no events. */
 export type PopupPointer = "inside" | "edge";
 
+/** What the editor chrome needs from any popup it opens. */
+export interface ChromeOverlay extends Component {
+	onPointer: ((at: PopupPointer) => void) | undefined;
+	close(value?: string): void;
+}
+
+function popupPointerAt(event: TuiMouseEvent): PopupPointer {
+	return event.x === 0 || event.y === 0 || event.x === event.width - 1 ? "edge" : "inside";
+}
+
+function framePopup(title: string, body: readonly string[], width: number, border: (text: string) => string, theme: PopupTheme): string[] {
+	const inner = Math.max(1, width - 2 - 2 * POPUP_PADDING_X);
+	const pad = " ".repeat(POPUP_PADDING_X);
+	const lines = [fitHorizontalBorder(theme.fg("accent", ` ${title} `), "", width, border, "╭", "╮")];
+	for (const line of body) lines.push(`${border("│")}${pad}${padAnsiLine(line, inner)}${pad}${border("│")}`);
+	lines.push(fitHorizontalBorder("", "", width, border, "╰", "╯"));
+	return lines;
+}
+
+/** Total width of a framed popup showing `lines` without truncation. */
+export function infoPopupWidth(lines: readonly string[], maxWidth: number): number {
+	return Math.min(maxWidth, Math.max(0, ...lines.map(visibleWidth)) + 2 + 2 * POPUP_PADDING_X);
+}
+
+/** Framed read-only lines rendered as a TUI overlay; rendered once per width, closes itself on blur or Escape. */
+export class InfoPopup implements ChromeOverlay {
+	private closed = false;
+	private _focused = false;
+	private rendered: { width: number; lines: string[] } | undefined;
+	onPointer: ((at: PopupPointer) => void) | undefined;
+
+	constructor(
+		private readonly title: string,
+		private readonly lines: readonly string[],
+		private readonly border: (text: string) => string,
+		private readonly theme: PopupTheme,
+		private readonly done: () => void,
+	) {}
+
+	get focused(): boolean {
+		return this._focused;
+	}
+
+	get isClosed(): boolean {
+		return this.closed;
+	}
+
+	set focused(value: boolean) {
+		this._focused = value;
+		if (!value) queueMicrotask(() => { if (!this._focused) this.close(); });
+	}
+
+	close(): void {
+		if (this.closed) return;
+		this.closed = true;
+		this.done();
+	}
+
+	render(width: number): string[] {
+		if (this.rendered?.width !== width) this.rendered = { width, lines: framePopup(this.title, this.lines, width, this.border, this.theme) };
+		return this.rendered.lines;
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) this.close();
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult {
+		if (event.type === "move") this.onPointer?.(popupPointerAt(event));
+		return { handled: true, render: false };
+	}
+
+	invalidate(): void {
+		this.rendered = undefined;
+	}
+}
+
 /** Framed single-column list rendered as a TUI overlay; closes itself on blur. */
-export class ChromePopup implements Component {
+export class ChromePopup implements ChromeOverlay {
 	private readonly list: SelectList;
 	private readonly rows: number;
 	private closed = false;
@@ -541,13 +625,7 @@ export class ChromePopup implements Component {
 
 	render(width: number): string[] {
 		const inner = Math.max(1, width - 2 - 2 * POPUP_PADDING_X);
-		const pad = " ".repeat(POPUP_PADDING_X);
-		const lines = [fitHorizontalBorder(this.theme.fg("accent", ` ${this.title} `), "", width, this.border, "╭", "╮")];
-		for (const line of this.list.render(inner).slice(0, this.rows)) {
-			lines.push(`${this.border("│")}${pad}${padAnsiLine(line, inner)}${pad}${this.border("│")}`);
-		}
-		lines.push(fitHorizontalBorder("", "", width, this.border, "╰", "╯"));
-		return lines;
+		return framePopup(this.title, this.list.render(inner).slice(0, this.rows), width, this.border, this.theme);
 	}
 
 	handleInput(data: string): void {
@@ -556,7 +634,7 @@ export class ChromePopup implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (event.type === "move") {
-			this.onPointer?.(event.x === 0 || event.y === 0 || event.x === event.width - 1 ? "edge" : "inside");
+			this.onPointer?.(popupPointerAt(event));
 			return { handled: true, render: false };
 		}
 		const inner = event.width - 2 - 2 * POPUP_PADDING_X;
@@ -648,6 +726,7 @@ function usedPercentFrom(value: unknown): number | undefined {
 	return parsed !== undefined && parsed >= 0 && parsed <= 100 ? parsed : undefined;
 }
 
+/** Anthropic response headers report utilization as a 0-1 fraction. */
 function utilizationPercentFrom(value: unknown): number | undefined {
 	const parsed = numberFrom(value);
 	return parsed !== undefined && parsed >= 0 && parsed <= 1 ? parsed * 100 : undefined;
@@ -663,16 +742,30 @@ function getHeader(headers: Record<string, string>, name: string): string | unde
 	return undefined;
 }
 
-function makeSubscriptionUsage(provider: string, usedPercent: number, resetAtSeconds?: number): SubscriptionUsage {
+function usageWindow(usedPercent: number, resetAtSeconds?: number): UsageWindow {
 	const resetAtMs = resetAtSeconds && resetAtSeconds > 0 ? resetAtSeconds * 1000 : undefined;
-	return { provider, usedPercent, ...(resetAtMs ? { resetAtMs } : {}) };
+	return { usedPercent, ...(resetAtMs ? { resetAtMs } : {}) };
 }
 
-function selectWeeklyWindow(windows: Array<RateLimitWindowUsage | null>): RateLimitWindowUsage | null {
+function makeSubscriptionUsage(provider: string, weekly: RateLimitWindowUsage, fiveHour: RateLimitWindowUsage | null): SubscriptionUsage {
+	return {
+		provider,
+		...usageWindow(weekly.usedPercent, weekly.resetAtSeconds),
+		...(fiveHour ? { fiveHour: usageWindow(fiveHour.usedPercent, fiveHour.resetAtSeconds) } : {}),
+	};
+}
+
+function selectWindow(windows: Array<RateLimitWindowUsage | null>, lengthMinutes: number): RateLimitWindowUsage | null {
 	return windows.find((window) => {
 		const minutes = window?.windowMinutes ?? 0;
-		return minutes >= ONE_WEEK_MINUTES * 0.95 && minutes <= ONE_WEEK_MINUTES * 1.05;
+		return minutes >= lengthMinutes * 0.95 && minutes <= lengthMinutes * 1.05;
 	}) ?? null;
+}
+
+/** Codex reports its 5-hour and weekly windows in either slot; tell them apart by length. */
+function codexSubscriptionUsage(windows: Array<RateLimitWindowUsage | null>): SubscriptionUsage | null {
+	const weekly = selectWindow(windows, ONE_WEEK_MINUTES);
+	return weekly ? makeSubscriptionUsage("openai-codex", weekly, selectWindow(windows, FIVE_HOURS_MINUTES)) : null;
 }
 
 function parseCodexHeaderWindow(headers: Record<string, string>, slot: "primary" | "secondary"): RateLimitWindowUsage | null {
@@ -686,18 +779,18 @@ function parseCodexHeaderWindow(headers: Record<string, string>, slot: "primary"
 }
 
 function parseCodexSubscriptionUsageFromHeaders(headers: Record<string, string>): SubscriptionUsage | null {
-	const weekly = selectWeeklyWindow([
-		parseCodexHeaderWindow(headers, "primary"),
-		parseCodexHeaderWindow(headers, "secondary"),
-	]);
-	return weekly ? makeSubscriptionUsage("openai-codex", weekly.usedPercent, weekly.resetAtSeconds) : null;
+	return codexSubscriptionUsage([parseCodexHeaderWindow(headers, "primary"), parseCodexHeaderWindow(headers, "secondary")]);
+}
+
+function parseAnthropicHeaderWindow(headers: Record<string, string>, slot: "7d" | "5h"): RateLimitWindowUsage | null {
+	const usedPercent = utilizationPercentFrom(getHeader(headers, `anthropic-ratelimit-unified-${slot}-utilization`));
+	if (usedPercent === undefined) return null;
+	return { usedPercent, resetAtSeconds: numberFrom(getHeader(headers, `anthropic-ratelimit-unified-${slot}-reset`)) };
 }
 
 function parseAnthropicSubscriptionUsageFromHeaders(headers: Record<string, string>): SubscriptionUsage | null {
-	const usedPercent = utilizationPercentFrom(getHeader(headers, "anthropic-ratelimit-unified-7d-utilization"));
-	if (usedPercent === undefined) return null;
-	const resetAtSeconds = numberFrom(getHeader(headers, "anthropic-ratelimit-unified-7d-reset"));
-	return makeSubscriptionUsage("anthropic", usedPercent, resetAtSeconds);
+	const weekly = parseAnthropicHeaderWindow(headers, "7d");
+	return weekly ? makeSubscriptionUsage("anthropic", weekly, parseAnthropicHeaderWindow(headers, "5h")) : null;
 }
 
 function parseSubscriptionUsageFromHeaders(provider: string | undefined, headers: Record<string, string>): SubscriptionUsage | null {
@@ -706,12 +799,59 @@ function parseSubscriptionUsageFromHeaders(provider: string | undefined, headers
 	return null;
 }
 
-function formatResetCountdown(resetAtMs: number): string {
-	const remainingMs = Math.max(0, resetAtMs - Date.now());
+function formatResetCountdown(resetAtMs: number, now = Date.now()): string {
+	const remainingMs = Math.max(0, resetAtMs - now);
 	const totalHours = remainingMs === 0 ? 0 : Math.ceil(remainingMs / (60 * 60 * 1000));
 	const days = Math.floor(totalHours / 24);
 	const hours = totalHours % 24;
 	return `${days}d${String(hours).padStart(2, "0")}h`;
+}
+
+/** Countdown in hours and minutes for the 5-hour window, where days would be meaningless. */
+export function formatShortCountdown(resetAtMs: number, now: number): string {
+	const totalMinutes = Math.max(0, Math.ceil((resetAtMs - now) / (60 * 1000)));
+	const hours = Math.floor(totalMinutes / 60);
+	const minutes = totalMinutes % 60;
+	return hours > 0 ? `${hours}h${String(minutes).padStart(2, "0")}m` : `${minutes}m`;
+}
+
+/**
+ * How far usage sits from a straight line through the window, in percentage points:
+ * positive when less has been used than the elapsed share of the window (ahead), negative when more (behind).
+ */
+export function usagePace(window: UsageWindow, windowMs: number, now: number): number | undefined {
+	if (!window.resetAtMs) return undefined;
+	const elapsed = clamp(1 - (window.resetAtMs - now) / windowMs, 0, 1);
+	return Math.round(elapsed * 100 - window.usedPercent);
+}
+
+type UsagePopupTheme = { fg(color: ThemeColor, text: string): string };
+
+/** One line per window: `Weekly: 38% used (12% ahead) | resets in 4d18h`, columns aligned across lines. */
+export function usagePopupLines(usage: SubscriptionUsage, now: number, theme: UsagePopupTheme): string[] {
+	const rows = [
+		{ label: "Weekly:", window: usage, windowMs: ONE_WEEK_MS, countdown: formatResetCountdown },
+		...(usage.fiveHour ? [{ label: "5h:", window: usage.fiveHour, windowMs: FIVE_HOURS_MS, countdown: formatShortCountdown }] : []),
+	].map(({ label, window, windowMs, countdown }) => {
+		const pace = usagePace(window, windowMs, now);
+		const paceText = pace === undefined ? "" : pace === 0 ? "on pace" : `${Math.abs(pace)}% ${pace > 0 ? "ahead" : "behind"}`;
+		const paceColor: ThemeColor = pace === undefined || pace === 0 ? "muted" : pace > 0 ? "success" : "error";
+		return {
+			label,
+			used: `${String(Math.round(clamp(window.usedPercent, 0, 100))).padStart(3)}% used`,
+			pace: paceText,
+			paceColor,
+			reset: window.resetAtMs ? `resets in ${countdown(window.resetAtMs, now)}` : "",
+		};
+	});
+	const labelWidth = Math.max(...rows.map((row) => row.label.length));
+	const paceWidth = Math.max(...rows.map((row) => row.pace.length + 2));
+	return rows.map((row) => {
+		let line = `${row.label.padEnd(labelWidth)} ${row.used}`;
+		if (row.pace) line += ` (${theme.fg(row.paceColor, row.pace)})${" ".repeat(paceWidth - row.pace.length - 2)}`;
+		if (row.reset) line += ` ${theme.fg("muted", `| ${row.reset}`)}`;
+		return line;
+	});
 }
 
 function formatUsageMetric(usage: SubscriptionUsage, theme?: HudTheme): string {
@@ -782,20 +922,20 @@ function parseCodexPayloadWindow(window: any): RateLimitWindowUsage | null {
 
 export function parseCodexSubscriptionUsagePayload(payload: any): SubscriptionUsage | null {
 	const rateLimit = payload?.rate_limit;
-	const weekly = selectWeeklyWindow([
-		parseCodexPayloadWindow(rateLimit?.primary_window),
-		parseCodexPayloadWindow(rateLimit?.secondary_window),
-	]);
-	return weekly ? makeSubscriptionUsage("openai-codex", weekly.usedPercent, weekly.resetAtSeconds) : null;
+	return codexSubscriptionUsage([parseCodexPayloadWindow(rateLimit?.primary_window), parseCodexPayloadWindow(rateLimit?.secondary_window)]);
 }
 
-function parseAnthropicSubscriptionUsagePayload(payload: any): SubscriptionUsage | null {
-	const weekly = payload?.seven_day ?? payload?.seven_day_oauth_apps;
-	const usedPercent = utilizationPercentFrom(weekly?.utilization);
+/** The Anthropic usage endpoint reports utilization in percent, unlike its response headers. */
+function parseAnthropicPayloadWindow(window: any): RateLimitWindowUsage | null {
+	const usedPercent = usedPercentFrom(window?.utilization);
 	if (usedPercent === undefined) return null;
-	const resetAtMs = typeof weekly?.resets_at === "string" ? Date.parse(weekly.resets_at) : undefined;
-	const resetAtSeconds = resetAtMs && Number.isFinite(resetAtMs) ? resetAtMs / 1000 : undefined;
-	return makeSubscriptionUsage("anthropic", usedPercent, resetAtSeconds);
+	const resetAtMs = typeof window.resets_at === "string" ? Date.parse(window.resets_at) : undefined;
+	return { usedPercent, resetAtSeconds: resetAtMs && Number.isFinite(resetAtMs) ? resetAtMs / 1000 : undefined };
+}
+
+export function parseAnthropicSubscriptionUsagePayload(payload: any): SubscriptionUsage | null {
+	const weekly = parseAnthropicPayloadWindow(payload?.seven_day ?? payload?.seven_day_oauth_apps);
+	return weekly ? makeSubscriptionUsage("anthropic", weekly, parseAnthropicPayloadWindow(payload?.five_hour)) : null;
 }
 
 async function fetchCodexSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
@@ -1036,11 +1176,12 @@ export default function (pi: ExtensionAPI) {
 		return currentCtx.model?.provider === latestSubscriptionUsage.provider ? latestSubscriptionUsage : null;
 	}
 
-	function inputUsageMetric(theme?: HudTheme): string {
+	/** Bottom-right label: subscription quota (clickable, it has a popup) or session cost on API-key billing. */
+	function inputUsageSegments(theme: HudTheme): LabelSegment[] {
 		const subscriptionUsage = currentSubscriptionUsage();
-		if (subscriptionUsage) return formatUsageMetric(subscriptionUsage, theme);
-		if (!isUsingSubscriptionAuth(currentCtx)) return formatSessionCost(sessionCost(currentCtx), theme);
-		return "";
+		if (subscriptionUsage) return [{ text: formatUsageMetric(subscriptionUsage, theme), target: "usage" }];
+		if (!isUsingSubscriptionAuth(currentCtx)) return [{ text: formatSessionCost(sessionCost(currentCtx), theme) }];
+		return [];
 	}
 
 	function joinFooterDetails(parts: string[], theme?: HudTheme): string {
@@ -1312,22 +1453,36 @@ export default function (pi: ExtensionAPI) {
 					if (pinned) actionHandlers?.get(MODEL_SELECT_ACTION)?.();
 					return;
 				}
-				const spec = popupSpec(target, ctx, model);
-				if (!spec) return;
-				const width = popupWidth(spec.items, tui.terminal.columns);
-				const { row, col } = popupPosition(event, layout.width, { width, height: popupRows(spec.items.length) + 2 }, tui.terminal);
 				const border = editor.borderColor?.bind(editor) ?? ((text: string) => hudTheme.fg("accent", text));
+				let width: number;
+				let height: number;
+				let create: (done: (value: string | undefined) => void) => ChromeOverlay;
+				if (target === "usage") {
+					const usage = currentSubscriptionUsage();
+					if (!usage) return;
+					const lines = usagePopupLines(usage, Date.now(), hudTheme);
+					width = infoPopupWidth(lines, tui.terminal.columns);
+					height = lines.length + 2;
+					create = (done) => new InfoPopup("Usage", lines, border, hudTheme, () => done(undefined));
+				} else {
+					const spec = popupSpec(target, ctx, model);
+					if (!spec) return;
+					width = popupWidth(spec.items, tui.terminal.columns);
+					height = popupRows(spec.items.length) + 2;
+					create = (done) => new ChromePopup(spec.title, spec.items, spec.preselect, border, hudTheme, done);
+				}
+				const { row, col } = popupPosition(event, layout.width, { width, height }, tui.terminal);
 
-				let popup: ChromePopup | undefined;
+				let popup: ChromeOverlay | undefined;
 				const choice = ctx.ui.custom<string | undefined>((_tui, _theme, _keybindings, done) => {
-					popup = new ChromePopup(spec.title, spec.items, spec.preselect, border, hudTheme, done);
+					popup = create(done);
 					popup.onPointer = handlePopupPointer;
 					return popup;
 				}, { overlay: true, overlayOptions: { row, col, width, nonCapturing: !pinned } });
 				const opened = {
 					target,
 					pinned,
-					close: () => popup?.close(undefined),
+					close: () => popup?.close(),
 					pin: () => {
 						opened.pinned = true;
 						cancelHoverLeave();
@@ -1413,35 +1568,39 @@ export default function (pi: ExtensionAPI) {
 					const bottomIndicator = bottomIndex === undefined ? "" : scrollIndicator(lines[bottomIndex] ?? "");
 					const labelSegments = currentModelLabelSegments();
 					const modelLabel = labelSegments.map((segment) => segment.text).join("");
-					const usageMetric = inputUsageMetric(hudTheme);
+					const usageSegments = inputUsageSegments(hudTheme);
+					const usageMetric = usageSegments.map((segment) => segment.text).join("");
 					const topLeft = topIndicator ? hudTheme.fg("dim", ` ${topIndicator} `) : "";
 					const bottomLeft = bottomIndicator ? hudTheme.fg("dim", ` ${bottomIndicator} `) : "";
 					const topRight = modelLabel ? hudTheme.fg("accent", ` ${modelLabel} `) : "";
 					const bottomRight = usageMetric ? ` ${usageMetric} ` : "";
 					const top = layoutHorizontalBorder(topLeft, topRight, width, border, "╭", "╮");
+					const bottom = layoutHorizontalBorder(bottomLeft, bottomRight, width, border, "╰", "╯");
 					const rendered = [top.line];
 
 					for (let i = bottomIndex === undefined ? 0 : 1; i < lines.length; i++) {
 						const line = lines[i] ?? "";
 						if (i === bottomIndex) {
-							rendered.push(fitHorizontalBorder(bottomLeft, bottomRight, width, border, "╰", "╯"));
+							rendered.push(bottom.line);
 						} else if (bottomIndex !== undefined && i > bottomIndex) {
 							rendered.push(fitLine(line, width));
 						} else {
 							rendered.push(`${border("│")}${padAnsiLine(line, innerWidth)}${border("│")}`);
 						}
 					}
-					if (bottomIndex === undefined) {
-						rendered.push(fitHorizontalBorder(bottomLeft, bottomRight, width, border, "╰", "╯"));
-					}
+					const bottomRow = bottomIndex ?? rendered.length;
+					if (bottomIndex === undefined) rendered.push(bottom.line);
 
-					// The label sits one column after rightStart (its leading pad) and ends before the corner.
+					// Each label sits one column after rightStart (its leading pad) and ends before the corner.
 					chromeLayout = {
 						width,
 						innerWidth,
 						bottomIndex,
 						lineCount: rendered.length,
-						hotspots: labelHotspots(labelSegments, top.rightStart + 1, top.rightStart + top.rightWidth),
+						hotspots: [
+							...labelHotspots(labelSegments, 0, top.rightStart + 1, top.rightStart + top.rightWidth),
+							...labelHotspots(usageSegments, bottomRow, bottom.rightStart + 1, bottom.rightStart + bottom.rightWidth),
+						],
 					};
 					return rendered;
 				} catch (err) {

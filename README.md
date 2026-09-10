@@ -33,6 +33,8 @@ The editor border:
   - clicking a label pins the popup: the arrow keys and Enter work, and it stays until you pick, press Escape, click the label again, or click anywhere else that takes focus
 - other extensions can add their own labels and popup rows next to these; see [Chrome menus for other extensions](#chrome-menus-for-other-extensions)
 - bottom right: `44% left` weekly subscription quota, or session cost (`$0.042`) when using API-key billing
+  - the quota opens a read-only popup on hover or click, one line per window the provider reports: `Weekly: 56% used (12% ahead) | resets in 4d18h`, plus a `5h:` line when there is a 5-hour window (Anthropic; Codex plans without one show only the weekly line)
+  - the pace compares what you have used with how much of the window has elapsed: `12% ahead` (green) means 12 points less used than a steady burn would have reached by now, `12% behind` (red) means 12 points more, `on pace` when they match
 - one-column input gutter with word wrapping inside a full rounded border; scroll indicators (`↑ 3 more`) stay visible in the border
 
 ## Install
@@ -88,7 +90,7 @@ How to read the numbers:
 - the standard extension-status path is independent of package and request-hook order; payload-only integrations update the indicator on the next provider request and still need their payload patch to run before the HUD's observation hook
 - `44% left` is your weekly subscription quota remaining; it appears when Pi is authenticated via OpenAI Codex or Anthropic subscription OAuth
 - quota comes from a background probe of the provider usage endpoint at session start, after model switches, and every 5 minutes, plus provider rate-limit headers on each response when the transport exposes them (OpenAI Codex only does so on the SSE transport, not the default WebSocket transport); if neither is available the metric simply stays absent
-- on API-key billing the bottom border shows Pi's calculated session cost instead
+- on API-key billing the bottom border shows Pi's calculated session cost instead, with no popup
 
 The HUD and auto-compact communicate through Pi's shared extension event bus. The HUD does not read or duplicate auto-compact's configuration rules. Run `/reload` after installing or changing either extension.
 
