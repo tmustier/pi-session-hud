@@ -471,11 +471,12 @@ export function popupPosition(
 	editorWidth: number,
 	size: { width: number; height: number },
 	terminal: { columns: number; rows: number },
+	aboveScreenRow?: number,
 ): { row: number; col: number } {
 	const editorLeft = anchor.screenX - anchor.x;
 	const editorTop = anchor.screenY - anchor.y;
 	return {
-		row: Math.max(0, editorTop - size.height),
+		row: Math.max(0, (aboveScreenRow ?? editorTop) - size.height),
 		col: Math.max(0, Math.min(editorLeft + editorWidth - size.width, terminal.columns - size.width)),
 	};
 }
@@ -1480,7 +1481,15 @@ export default function (pi: ExtensionAPI) {
 					height = popupRows(spec.items.length) + 2;
 					create = (done) => new ChromePopup(spec.title, spec.items, spec.preselect, border, hudTheme, done);
 				}
-				const { row, col } = popupPosition(event, layout.width, { width, height }, tui.terminal);
+				// Model and thinking popups sit above the frame. Usage is targeted from the
+				// bottom border, so keep its popup adjacent even when a narrow editor wraps.
+				const { row, col } = popupPosition(
+					event,
+					layout.width,
+					{ width, height },
+					tui.terminal,
+					target === "usage" ? event.screenY : undefined,
+				);
 
 				let popup: ChromeOverlay | undefined;
 				const choice = ctx.ui.custom<string | undefined>((_tui, _theme, _keybindings, done) => {

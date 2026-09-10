@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-10
+
+- Keep the usage popup directly adjacent to its bottom-border hover target, so wrapped editors at narrow terminal widths no longer leave a dead gap between the label and popup.
+
 ## [0.6.2] - 2026-09-10
 
 - Fix usage pace direction and colour in the quota popup: using more quota than the elapsed share of the window is now `ahead` in red; using less is `behind` in green.
