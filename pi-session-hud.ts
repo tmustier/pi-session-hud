@@ -302,17 +302,24 @@ export function requestUsesFastMode(payload: unknown): boolean {
 	return request.service_tier === "priority" || request.speed === "fast";
 }
 
-export function modelLabelSegments(modelId: string, thinking: string, fastModeActive: boolean): LabelSegment[] {
+export interface LabelModel {
+	id: string;
+	reasoning: boolean;
+}
+
+export function modelLabelSegments(model: LabelModel, thinking: string, fastModeActive: boolean): LabelSegment[] {
 	const segments: LabelSegment[] = [];
 	// Use a single-column text glyph so the TUI and terminal agree on border width.
 	if (fastModeActive) segments.push({ text: "↯ • " });
-	segments.push({ text: modelId, target: "model" });
-	if (thinking !== "off") segments.push({ text: " • " }, { text: thinking, target: "thinking" });
+	segments.push({ text: model.id, target: "model" });
+	// Match Pi's footer: only reasoning models get a thinking segment, and "off" stays
+	// visible so a click can turn thinking back on.
+	if (model.reasoning) segments.push({ text: " • " }, { text: thinking === "off" ? "thinking off" : thinking, target: "thinking" });
 	return segments;
 }
 
-export function formatModelLabel(modelId: string, thinking: string, fastModeActive: boolean): string {
-	return modelLabelSegments(modelId, thinking, fastModeActive).map((segment) => segment.text).join("");
+export function formatModelLabel(model: LabelModel, thinking: string, fastModeActive: boolean): string {
+	return modelLabelSegments(model, thinking, fastModeActive).map((segment) => segment.text).join("");
 }
 
 /**
@@ -746,7 +753,7 @@ export default function (pi: ExtensionAPI) {
 		const model = currentCtx?.model;
 		if (!model) return [];
 		const fastModeActive = extensionFastModeActive ?? lastRequestUsedFastMode;
-		return modelLabelSegments(model.id, pi.getThinkingLevel(), fastModeActive);
+		return modelLabelSegments(model, pi.getThinkingLevel(), fastModeActive);
 	}
 
 	function syncExtensionStatuses(footerData: ReadonlyFooterDataProvider): string[] {

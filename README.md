@@ -25,7 +25,7 @@ The footer line, left to right:
 
 The editor border:
 
-- top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when fast mode is active, the single-column lightning symbol `↯` appears first
+- top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when fast mode is active, the single-column lightning symbol `↯` appears first. Like Pi's own footer, reasoning models show `thinking off` when thinking is off, and models without thinking support show only the model id
 - in Pi's fullscreen TUI mode (`--tui-mode fullscreen` or the `tuiMode` setting), click the model id to open Pi's model selector and click the thinking level to cycle to the next level; these run the same `app.model.select` and `app.thinking.cycle` actions as Ctrl+L and Shift+Tab, so rebinding those keys does not change the clicks
 - bottom right: `44% left` weekly subscription quota, or session cost (`$0.042`) when using API-key billing
 - one-column input gutter with word wrapping inside a full rounded border; scroll indicators (`↑ 3 more`) stay visible in the border

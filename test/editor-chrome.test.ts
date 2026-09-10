@@ -33,18 +33,30 @@ function layout(overrides: Partial<ChromeLayout> = {}): ChromeLayout {
 	return { width: 60, innerWidth: 58, bottomIndex: 2, lineCount: 3, hotspots: [], ...overrides };
 }
 
+const reasoningModel = { id: "gpt-5.6-sol", reasoning: true };
+const plainModel = { id: "gpt-5.6-sol", reasoning: false };
+
 test("label segments mark only the model id and thinking level as clickable", () => {
-	assert.deepEqual(modelLabelSegments("gpt-5.6-sol", "medium", true), [
+	assert.deepEqual(modelLabelSegments(reasoningModel, "medium", true), [
 		{ text: "↯ • " },
 		{ text: "gpt-5.6-sol", target: "model" },
 		{ text: " • " },
 		{ text: "medium", target: "thinking" },
 	]);
-	assert.deepEqual(modelLabelSegments("gpt-5.6-sol", "off", false), [{ text: "gpt-5.6-sol", target: "model" }]);
+});
+
+test("thinking off stays visible and clickable on reasoning models, like Pi's footer", () => {
+	assert.deepEqual(modelLabelSegments(reasoningModel, "off", false), [
+		{ text: "gpt-5.6-sol", target: "model" },
+		{ text: " • " },
+		{ text: "thinking off", target: "thinking" },
+	]);
+	assert.deepEqual(modelLabelSegments(plainModel, "off", false), [{ text: "gpt-5.6-sol", target: "model" }]);
+	assert.deepEqual(modelLabelSegments(plainModel, "medium", false), [{ text: "gpt-5.6-sol", target: "model" }]);
 });
 
 test("hotspots follow segment widths from the label start and clip at the visible limit", () => {
-	const segments = modelLabelSegments("gpt-5.6-sol", "medium", false);
+	const segments = modelLabelSegments(reasoningModel, "medium", false);
 	assert.deepEqual(labelHotspots(segments, 38, 59), [
 		{ start: 38, end: 49, target: "model" },
 		{ start: 52, end: 58, target: "thinking" },
@@ -58,7 +70,7 @@ test("hotspots follow segment widths from the label start and clip at the visibl
 });
 
 test("chrome targets resolve only on the top border row", () => {
-	const hotspots = labelHotspots(modelLabelSegments("gpt-5.6-sol", "medium", false), 38, 59);
+	const hotspots = labelHotspots(modelLabelSegments(reasoningModel, "medium", false), 38, 59);
 	const chrome = layout({ hotspots });
 	assert.equal(chromeTargetAt(chrome, 38, 0), "model");
 	assert.equal(chromeTargetAt(chrome, 48, 0), "model");
@@ -96,7 +108,7 @@ test("reads the Codex account id from the OAuth access token claims", () => {
 
 type Handler = (event: unknown, ctx: unknown) => Promise<void> | void;
 
-function installHud(thinking: string, options: { oauth?: boolean; capturePress?: boolean } = {}) {
+function installHud(thinking: string, options: { oauth?: boolean; capturePress?: boolean; reasoning?: boolean } = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const actions: string[] = [];
 	const forwarded: TuiMouseEvent[] = [];
@@ -124,7 +136,7 @@ function installHud(thinking: string, options: { oauth?: boolean; capturePress?:
 		getThinkingLevel: () => thinking,
 		getSessionName: () => "",
 	};
-	let model = { id: "gpt-5.6-sol", provider: "openai-codex", api: "openai-codex-responses", contextWindow: 272_000 };
+	let model = { id: "gpt-5.6-sol", provider: "openai-codex", api: "openai-codex-responses", contextWindow: 272_000, reasoning: options.reasoning ?? true };
 	const claims = { "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" } };
 	const token = `hdr.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
 	// Pi creates a fresh ExtensionContext object for every event it emits.
@@ -242,7 +254,7 @@ test("discards a probe from the previous provider that finishes after a model sw
 	try {
 		await hud.fire("session_start");
 		const editor = hud.editorFactory()(fakeTui, {}, {});
-		await hud.selectModel({ id: "claude-opus-5", provider: "anthropic", api: "anthropic-messages", contextWindow: 200_000 });
+		await hud.selectModel({ id: "claude-opus-5", provider: "anthropic", api: "anthropic-messages", contextWindow: 200_000, reasoning: true });
 
 		anthropicProbe.resolve();
 		await settle();
@@ -279,8 +291,24 @@ test("owns the press on a hotspot so a wrapped editor that captures presses cann
 	}
 });
 
-test("a model without a thinking segment only exposes the model hotspot", async () => {
+test("clicking thinking off on a reasoning model still cycles the level", async () => {
 	const hud = installHud("off");
+	await hud.fire("session_start");
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		const top = editor.render(60)[0]!;
+		assert.match(top, /gpt-5\.6-sol • thinking off ╮/);
+
+		// " gpt-5.6-sol • thinking off " is 28 columns wide, so the label starts at column 32.
+		editor.handleMouse(mouse({ x: 50, y: 0 }));
+		assert.deepEqual(hud.actions, ["thinking"]);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("a model without thinking support only exposes the model hotspot", async () => {
+	const hud = installHud("medium", { reasoning: false });
 	await hud.fire("session_start");
 	try {
 		const editor = hud.editorFactory()(fakeTui, {}, {});
