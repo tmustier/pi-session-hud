@@ -2,17 +2,29 @@
 
 ## [Unreleased]
 
-- Add a usage popup to the quota label on the bottom border (hover or click, like the model and thinking popups): one line per window with `% used`, the pace against a steady burn through the window (`12% ahead` in green, `12% behind` in red, or `on pace`) and the reset countdown. A `5h:` line appears when the provider reports a 5-hour window. Session-cost labels have no popup.
-- Fix the Anthropic subscription quota, which has been missing from the HUD: the usage endpoint reports `utilization` in percent while the response headers use a 0-1 fraction, and the parser only accepted the fraction.
-- Open the model and thinking popups on hover as well as click. A hover popup takes no focus, so typing keeps going to the editor and dismisses it; it follows the pointer between labels and closes when the pointer leaves. Clicking the label pins it for keyboard navigation. Hover needs pointer-motion reporting, which Pi disables under tmux, zellij and screen.
-- Let other extensions add menus to the input border over `pi.events` (`chrome-menu.ts`): a label with its own popup, an informational label, or rows appended to the model or thinking popup. The HUD asks for menus when it installs, so load order does not matter.
-- Close an open popup when the HUD is turned off or the session shuts down.
-- Make the model id and thinking level in the input border clickable in Pi's fullscreen TUI mode. Each opens a popup above the input box: the model popup lists the session's scoped models plus `Other…`, which opens Pi's full model selector on the all scope (or goes straight there when no scope is configured); the thinking popup lists the levels the current model supports. Popups close on selection, Escape, a second click on the label, or any click that moves focus.
-- Show `thinking off` on reasoning models instead of dropping the thinking segment, so a click can turn thinking back on; models without thinking support show only the model id, matching Pi's footer.
-- Forward other mouse input to the wrapped editor in its own coordinate space so click-to-position, drag selection, and autocomplete clicks keep working inside the HUD frame.
-- Fix the OpenAI Codex subscription usage probe on Pi 0.80.8 and newer, where `modelRegistry.authStorage` no longer exists; the account id is now read from the OAuth access token as Pi itself does.
-- Keep usage probe and Git refresh results when other events fire while they are in flight; Pi builds a fresh context object per event, so the previous identity check discarded most results and left the weekly quota missing until the next five-minute probe.
-- Build and type-check against Pi 0.85.1.
+## [0.6.0] - 2026-09-10
+
+Requires Pi's fullscreen TUI mode (`--tui-mode fullscreen` or the `tuiMode` setting) for the mouse features; in regular mode Pi does not capture mouse input and the HUD behaves as before.
+
+### Added
+
+- Model and thinking popups on the input border. The model id opens a popup listing the session's scoped models (`--models` or `enabledModels`, the same set as `/scoped-models`) plus `Other…`, which opens Pi's full model selector on the all scope; with no scope configured a click goes straight to Pi's selector. The thinking level lists the levels the current model supports. Pick with a click or the arrow keys and Enter.
+- Hover to preview, click to pin. Moving the pointer onto a label opens its popup without taking focus, so typing keeps going to the editor and dismisses it; the popup follows the pointer between labels and closes when the pointer leaves. Clicking the label pins it for keyboard navigation until you pick, press Escape, click the label again, or click anywhere else that takes focus. Hover needs pointer-motion reporting, which Pi turns off under tmux, zellij and screen; there the popups still open on click.
+- Usage popup on the quota label on the bottom border: one line per window the provider reports, with `% used`, the pace against a steady burn through the window (`12% ahead` in green, `12% behind` in red, or `on pace`) and the reset countdown. A `5h:` line appears when the provider reports a 5-hour window (Anthropic does; Codex plans without one show only the weekly line). Session-cost labels have no popup.
+- Chrome menus for other extensions (`chrome-menu.ts`). An extension can add its own label and popup to the input border, an informational label, or rows appended to the model or thinking popup, all over `pi.events` with a request/announce handshake so load order does not matter. See the README for the protocol.
+- `thinking off` is shown on reasoning models instead of dropping the thinking segment, so a click can turn thinking back on; models without thinking support show only the model id, matching Pi's footer.
+
+### Fixed
+
+- The Anthropic subscription quota had been missing from the HUD: the usage endpoint reports `utilization` in percent while the response headers use a 0-1 fraction, and the parser only accepted the fraction. Each source is now read in its own unit, and both supply the 5-hour window.
+- The OpenAI Codex subscription usage probe on Pi 0.80.8 and newer, where `modelRegistry.authStorage` no longer exists; the account id is now read from the OAuth access token as Pi itself does.
+- Usage probe and Git refresh results are kept when other events fire while they are in flight. Pi builds a fresh context object per event, so the previous identity check discarded most results and left the weekly quota missing until the next five-minute probe.
+- Mouse input that is not on a label is forwarded to the wrapped editor in its own coordinate space, so click-to-position, drag selection and autocomplete clicks keep working inside the HUD frame.
+- An open popup is closed when the HUD is turned off or the session shuts down.
+
+### Changed
+
+- Built and type-checked against Pi 0.85.1. `@earendil-works/pi-ai` joins the peer dependencies (it ships with Pi) for the list of thinking levels a model supports.
 
 ## [0.5.3] - 2026-09-01
 
