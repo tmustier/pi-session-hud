@@ -80,20 +80,23 @@ test("thinking off stays visible and clickable on reasoning models, like Pi's fo
 
 test("hotspots follow segment widths from the label start and clip at the visible limit", () => {
 	const segments = modelLabelSegments(reasoningModel, "medium", false);
-	assert.deepEqual(labelHotspots(segments, 38, 59), [
-		{ start: 38, end: 49, target: "model" },
-		{ start: 52, end: 58, target: "thinking" },
+	assert.deepEqual(labelHotspots(segments, 0, 38, 59), [
+		{ row: 0, start: 38, end: 49, target: "model" },
+		{ row: 0, start: 52, end: 58, target: "thinking" },
 	]);
 	// A truncated label exposes only the columns that were actually drawn.
-	assert.deepEqual(labelHotspots(segments, 38, 54), [
-		{ start: 38, end: 49, target: "model" },
-		{ start: 52, end: 54, target: "thinking" },
+	assert.deepEqual(labelHotspots(segments, 0, 38, 54), [
+		{ row: 0, start: 38, end: 49, target: "model" },
+		{ row: 0, start: 52, end: 54, target: "thinking" },
 	]);
-	assert.deepEqual(labelHotspots(segments, 38, 45), [{ start: 38, end: 45, target: "model" }]);
+	assert.deepEqual(labelHotspots(segments, 0, 38, 45), [{ row: 0, start: 38, end: 45, target: "model" }]);
 });
 
-test("chrome targets resolve only on the top border row", () => {
-	const hotspots = labelHotspots(modelLabelSegments(reasoningModel, "medium", false), 38, 59);
+test("chrome targets resolve on their own border row only", () => {
+	const hotspots = [
+		...labelHotspots(modelLabelSegments(reasoningModel, "medium", false), 0, 38, 59),
+		...labelHotspots([{ text: "44% left", target: "usage" }], 2, 50, 58),
+	];
 	const chrome = layout({ hotspots });
 	assert.equal(chromeTargetAt(chrome, 38, 0), "model");
 	assert.equal(chromeTargetAt(chrome, 48, 0), "model");
@@ -101,6 +104,9 @@ test("chrome targets resolve only on the top border row", () => {
 	assert.equal(chromeTargetAt(chrome, 55, 0), "thinking");
 	assert.equal(chromeTargetAt(chrome, 58, 0), undefined);
 	assert.equal(chromeTargetAt(chrome, 40, 1), undefined);
+	assert.equal(chromeTargetAt(chrome, 55, 1), undefined);
+	assert.equal(chromeTargetAt(chrome, 55, 2), "usage");
+	assert.equal(chromeTargetAt(chrome, 49, 2), undefined);
 });
 
 test("mouse events shift one column inside the frame and stay put on autocomplete rows", () => {
@@ -229,7 +235,7 @@ function installHud(
 		model = next;
 		await fire("model_select");
 	};
-	return { fire, selectModel, editorFactory: () => editorFactory!, fakeEditor, actions, forwarded, popups, changes, notices, bus, emitted };
+	return { fire, selectModel, createCtx, handlers, editorFactory: () => editorFactory!, fakeEditor, actions, forwarded, popups, changes, notices, bus, emitted };
 }
 
 const strip = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -481,7 +487,7 @@ test("discards a probe from the previous provider that finishes after a model sw
 			return Response.json({ rate_limit: { primary_window: { used_percent: 37, limit_window_seconds: 604_800 } } });
 		}
 		await anthropicProbe.promise;
-		return Response.json({ seven_day: { utilization: 0.2, resets_at: "2100-01-01T00:00:00Z" } });
+		return Response.json({ seven_day: { utilization: 20, resets_at: "2100-01-01T00:00:00Z" } });
 	}) as typeof fetch;
 
 	const hud = installHud("medium", { oauth: true });
@@ -831,6 +837,122 @@ test("a pending hover open follows the pointer to the label it ends on", async (
 		await wait(HOVER_OPEN_DELAY_MS + 20);
 		assert.equal(hud.popups.length, 1);
 		assert.equal(hud.popups[0]!.component.isClosed, false);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+/** Serve a Codex usage probe: half the week gone at 37% used, 80% of the 5-hour window gone at 90%. */
+function serveUsageProbe() {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () => Response.json({
+		rate_limit: {
+			primary_window: { used_percent: 90, limit_window_seconds: 5 * 3600, reset_at: (Date.now() + 3600 * 1000 - 1000) / 1000 },
+			secondary_window: { used_percent: 37, limit_window_seconds: 7 * 24 * 3600, reset_at: (Date.now() + 84 * 3600 * 1000 - 1000) / 1000 },
+		},
+	})) as typeof fetch;
+	return () => { globalThis.fetch = originalFetch; };
+}
+
+test("the quota label on the bottom border opens a read-only usage popup on hover, pinned by a click, closed by Escape", async () => {
+	const restoreFetch = serveUsageProbe();
+	const hud = installHud("medium", { oauth: true });
+	fakeTui.focused = hud.fakeEditor;
+	try {
+		await hud.fire("session_start");
+		await settle();
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		const lines = editor.render(60);
+		assert.match(strip(lines[2]!), /─ 63% left ╯$/);
+
+		// " 63% left " is 10 columns wide, so the label spans columns 50-57 of the bottom border.
+		editor.handleMouse(hover(49, 2));
+		assert.deepEqual(hud.forwarded.map((event) => [event.x, event.y]), [[48, 2]], "the border itself is not a hotspot");
+		assert.deepEqual(editor.handleMouse(hover(52, 2)), { handled: true, render: false });
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(hud.popups.length, 1);
+		const { component, options } = hud.popups[0]!;
+		const overlay = (options as { overlayOptions: { width: number; nonCapturing: boolean } }).overlayOptions;
+		assert.equal(overlay.nonCapturing, true);
+		assert.equal(fakeTui.focused, hud.fakeEditor);
+		const rows = component.render(overlay.width).map(strip);
+		assert.equal(rows.length, 4);
+		assert.match(rows[0]!, /^╭ Usage ─+╮$/);
+		assert.equal(rows[1], "│ Weekly:  37% used (13% ahead)  | resets in 3d12h │");
+		assert.equal(rows[2], "│ 5h:      90% used (10% behind) | resets in 1h00m │");
+
+		editor.handleMouse(mouse({ x: 52, y: 2 }));
+		await settle();
+		assert.equal(fakeTui.focused, component);
+		assert.equal(component.isClosed, false);
+		component.handleInput("\x1b");
+		await settle();
+		assert.equal(component.isClosed, true);
+		assert.equal(fakeTui.focused, hud.fakeEditor);
+		assert.deepEqual(hud.changes, []);
+		assert.deepEqual(hud.actions, []);
+	} finally {
+		fakeTui.focused = null;
+		restoreFetch();
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("the session-cost label has no popup: clicks on it reach the editor", async () => {
+	const hud = installHud("medium");
+	await hud.fire("session_start");
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		assert.match(strip(editor.render(60)[2]!), /─ \$0\.000 ╯$/);
+		editor.handleMouse(mouse({ x: 54, y: 2 }));
+		await settle();
+		assert.equal(hud.popups.length, 0);
+		assert.deepEqual(hud.forwarded.map((event) => [event.x, event.y]), [[53, 2]]);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("response headers feed both windows: Anthropic as 0-1 fractions, Codex by window length", async () => {
+	const hud = installHud("medium", { oauth: true });
+	const fire = async (headers: Record<string, string>) => {
+		const ctx = hud.createCtx();
+		for (const handler of hud.handlers.get("after_provider_response") ?? []) await handler({ headers }, ctx);
+	};
+	await hud.fire("session_start");
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		await fire({
+			"x-codex-primary-used-percent": "90",
+			"x-codex-primary-window-minutes": "300",
+			"x-codex-primary-reset-at": String(Math.floor(Date.now() / 1000) + 3600 - 1),
+			"x-codex-secondary-used-percent": "37",
+			"x-codex-secondary-window-minutes": "10080",
+			"x-codex-secondary-reset-at": String(Math.floor(Date.now() / 1000) + 84 * 3600 - 1),
+		});
+		assert.match(strip(editor.render(60)[2]!), /─ 63% left ╯$/);
+		editor.handleMouse(mouse({ x: 52, y: 2 }));
+		await settle();
+		let rows = hud.popups.at(-1)!.component.render(80).map(strip);
+		assert.match(rows[1]!, /^│ Weekly:  37% used \(13% ahead\)  \| resets in 3d12h/);
+		assert.match(rows[2]!, /^│ 5h:      90% used \(10% behind\) \| resets in 1h00m/);
+		hud.popups.at(-1)!.component.close(undefined);
+		await settle();
+
+		await hud.selectModel({ id: "claude-opus-5", provider: "anthropic", api: "anthropic-messages", contextWindow: 1_000_000, reasoning: true });
+		await fire({
+			"anthropic-ratelimit-unified-5h-utilization": "0.28",
+			"anthropic-ratelimit-unified-5h-reset": String(Math.floor(Date.now() / 1000) + 3600 - 1),
+			"anthropic-ratelimit-unified-7d-utilization": "0.19",
+			"anthropic-ratelimit-unified-7d-reset": String(Math.floor(Date.now() / 1000) + 84 * 3600 - 1),
+			"anthropic-ratelimit-unified-status": "allowed",
+		});
+		assert.match(strip(editor.render(60)[2]!), /─ 81% left ╯$/);
+		editor.handleMouse(mouse({ x: 52, y: 2 }));
+		await settle();
+		rows = hud.popups.at(-1)!.component.render(80).map(strip);
+		assert.match(rows[1]!, /^│ Weekly:  19% used \(31% ahead\) \| resets in 3d12h/);
+		assert.match(rows[2]!, /^│ 5h:      28% used \(52% ahead\) \| resets in 1h00m/);
 	} finally {
 		await hud.fire("session_shutdown");
 	}

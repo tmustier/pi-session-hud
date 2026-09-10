@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add a usage popup to the quota label on the bottom border (hover or click, like the model and thinking popups): one line per window with `% used`, the pace against a steady burn through the window (`12% ahead` in green, `12% behind` in red, or `on pace`) and the reset countdown. A `5h:` line appears when the provider reports a 5-hour window. Session-cost labels have no popup.
+- Fix the Anthropic subscription quota, which has been missing from the HUD: the usage endpoint reports `utilization` in percent while the response headers use a 0-1 fraction, and the parser only accepted the fraction.
 - Open the model and thinking popups on hover as well as click. A hover popup takes no focus, so typing keeps going to the editor and dismisses it; it follows the pointer between labels and closes when the pointer leaves. Clicking the label pins it for keyboard navigation. Hover needs pointer-motion reporting, which Pi disables under tmux, zellij and screen.
 - Let other extensions add menus to the input border over `pi.events` (`chrome-menu.ts`): a label with its own popup, an informational label, or rows appended to the model or thinking popup. The HUD asks for menus when it installs, so load order does not matter.
 - Close an open popup when the HUD is turned off or the session shuts down.
