@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Make the model id and thinking level in the input border clickable in Pi's fullscreen TUI mode: the model opens Pi's model selector and the thinking level cycles to the next level, matching the `app.model.select` and `app.thinking.cycle` keybindings.
+- Make the model id and thinking level in the input border clickable in Pi's fullscreen TUI mode. Each opens a popup above the input box: the model popup lists the session's scoped models plus `Other…`, which opens Pi's full model selector on the all scope (or goes straight there when no scope is configured); the thinking popup lists the levels the current model supports. Popups close on selection, Escape, a second click on the label, or any click that moves focus.
 - Show `thinking off` on reasoning models instead of dropping the thinking segment, so a click can turn thinking back on; models without thinking support show only the model id, matching Pi's footer.
 - Forward other mouse input to the wrapped editor in its own coordinate space so click-to-position, drag selection, and autocomplete clicks keep working inside the HUD frame.
 - Fix the OpenAI Codex subscription usage probe on Pi 0.80.8 and newer, where `modelRegistry.authStorage` no longer exists; the account id is now read from the OAuth access token as Pi itself does.
