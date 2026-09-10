@@ -21,6 +21,7 @@ import {
 	truncateToWidth,
 	matchesKey,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import {
 	AUTO_COMPACT_POLICY_EVENT,
@@ -521,6 +522,19 @@ export function infoPopupWidth(lines: readonly string[], maxWidth: number): numb
 	return Math.min(maxWidth, Math.max(0, ...lines.map(visibleWidth)) + 2 + 2 * POPUP_PADDING_X);
 }
 
+function wrappedInfoPopupLines(lines: readonly string[], width: number): string[] {
+	const inner = Math.max(1, width - 2 - 2 * POPUP_PADDING_X);
+	return lines.flatMap((line) => {
+		const wrapped = wrapTextWithAnsi(line, inner);
+		return wrapped.length > 0 ? wrapped : [""];
+	});
+}
+
+/** Total popup height after wrapping its read-only lines at `width`. */
+export function infoPopupHeight(lines: readonly string[], width: number): number {
+	return wrappedInfoPopupLines(lines, width).length + 2;
+}
+
 /** Framed read-only lines rendered as a TUI overlay; rendered once per width, closes itself on blur or Escape. */
 export class InfoPopup implements ChromeOverlay {
 	private closed = false;
@@ -556,7 +570,9 @@ export class InfoPopup implements ChromeOverlay {
 	}
 
 	render(width: number): string[] {
-		if (this.rendered?.width !== width) this.rendered = { width, lines: framePopup(this.title, this.lines, width, this.border, this.theme) };
+		if (this.rendered?.width !== width) {
+			this.rendered = { width, lines: framePopup(this.title, wrappedInfoPopupLines(this.lines, width), width, this.border, this.theme) };
+		}
 		return this.rendered.lines;
 	}
 
@@ -1472,7 +1488,7 @@ export default function (pi: ExtensionAPI) {
 					if (!usage) return;
 					const lines = usagePopupLines(usage, Date.now(), hudTheme);
 					width = infoPopupWidth(lines, tui.terminal.columns);
-					height = lines.length + 2;
+					height = infoPopupHeight(lines, width);
 					create = (done) => new InfoPopup("Usage", lines, border, hudTheme, () => done(undefined));
 				} else {
 					const spec = popupSpec(target, ctx, model);
