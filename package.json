@@ -1,6 +1,6 @@
 {
   "name": "@tmustier/pi-session-hud",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "description": "Compact Pi session footer and Amp-style input-box chrome.",
   "type": "module",
   "license": "MIT",
@@ -17,6 +17,7 @@
   "files": [
     "pi-session-hud.ts",
     "auto-compact-limit.ts",
+    "native-compaction-limit.ts",
     "chrome-menu.ts",
     "README.md",
     "LICENSE",
@@ -37,9 +38,9 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-tui": "0.85.1",
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@earendil-works/pi-tui": "0.87.0",
     "@types/node": "22.19.19",
     "tsx": "4.22.1",
     "typescript": "5.9.3"

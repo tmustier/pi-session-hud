@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-22
+
+### Added
+
+- The context window now accounts for Pi's own auto-compaction. Pi compacts at `contextWindow - compaction.reserveTokens`, so a large per-model reserve makes a session compact far below the provider window: a 1M-token model with a 750k reserve used to read `98k/1.0M` and compact at 25%. The HUD reads `compaction` through Pi's `SettingsManager` — model overrides, project settings and defaults included — and shows the trigger point as `98k/250k↓` with the percentage against 250k. When `pi-auto-compact` is also loaded, whichever limit binds first is displayed.
+
+### Fixed
+
+- Tests resolve compaction settings from their own agent directory instead of the developer's `~/.pi/agent/settings.json`.
+
 ## [0.6.4] - 2026-09-10
 
 - Wrap usage-popup content at narrow terminal widths instead of truncating reset details with an ellipsis, and size the overlay to the wrapped rows.

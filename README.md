@@ -17,7 +17,7 @@ Only the context bar/text, git diff stats, session label, and usage metric use c
 
 The footer line, left to right:
 
-- colour-coded context usage bar, percentage, and used/window token counts; when `pi-auto-compact` lowers the window, the limit gets a down arrow such as `200k↓`
+- colour-coded context usage bar, percentage, and used/window token counts; when compaction triggers before the provider window, the limit shows that trigger point with a down arrow such as `250k↓`
 - current working directory and git branch
 - git diff stats (`+x -y`, or `~` when dirty); git-crypt repositories show dirty state without line counts
 - session name, or the first few words of the first user message when unnamed
@@ -81,9 +81,10 @@ The HUD installs itself on session start and survives `/reload`, `/resume`, and 
 How to read the numbers:
 
 - context colours run green → yellow-green → amber → red; thresholds are calibrated to a GPT-5.5-sized (272k) window and applied as absolute token counts on larger windows, so 1M-token models start warning at the same real usage instead of staying green too long
-- with [`pi-auto-compact`](https://github.com/tmustier/pi-auto-compact) v0.1.2 or newer loaded, the HUD resolves the active model's configured threshold and uses it when it is lower than the provider context window; for example, `98k/372k` becomes `98k/200k↓`, with the percentage recalculated against 200k
+- the displayed window is where the session actually runs out. Pi compacts when `contextTokens > contextWindow - compaction.reserveTokens`, so the HUD reads `compaction` from Pi's settings, including `modelOverrides` for the active model and any project settings, and shows that trigger point. A 1M-token model with a 750k reserve reads `98k/250k↓`, with the percentage recalculated against 250k
+- with [`pi-auto-compact`](https://github.com/tmustier/pi-auto-compact) v0.1.2 or newer loaded, its configured threshold is resolved too, and whichever limit binds first is displayed
 - context colours keep their established fixed token thresholds even when the displayed window is capped; the cap changes the denominator and percentage, not the colour band
-- if auto-compact is absent, does not answer the policy request, or has a threshold at or above the model context window, the HUD keeps Pi's provider context window
+- the HUD keeps Pi's provider context window when no limit binds below it: auto-compaction disabled, no auto-compact policy, or a reserve and threshold that leave the full window usable
 - `?` in the context slot means Pi has no fresh usage data yet, for example right after compaction
 - named sessions render white; the unnamed fallback (first words of your first message) renders muted grey
 - `↯` means fast mode is active: the HUD reads Pi's standard `fast-mode` extension status immediately and also passively observes serialized requests containing `service_tier: "priority"` or `speed: "fast"` as a fallback; it never enables or modifies fast mode
@@ -92,7 +93,7 @@ How to read the numbers:
 - quota comes from a background probe of the provider usage endpoint at session start, after model switches, and every 5 minutes, plus provider rate-limit headers on each response when the transport exposes them (OpenAI Codex only does so on the SSE transport, not the default WebSocket transport); if neither is available the metric simply stays absent
 - on API-key billing the bottom border shows Pi's calculated session cost instead, with no popup
 
-The HUD and auto-compact communicate through Pi's shared extension event bus. The HUD does not read or duplicate auto-compact's configuration rules. Run `/reload` after installing or changing either extension.
+The HUD and auto-compact communicate through Pi's shared extension event bus. The HUD does not read or duplicate auto-compact's configuration rules. Pi's own compaction settings are read through Pi's `SettingsManager`, so model overrides, the project merge and defaults stay Pi's. They are read once per session, so a settings edit applies on the next session or after `/reload`. Run `/reload` after installing or changing either extension.
 
 Git state refreshes at session start and after each agent run, not while idle.
 

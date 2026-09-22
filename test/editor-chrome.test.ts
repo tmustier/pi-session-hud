@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import { CHROME_MENU_EVENT, CHROME_MENU_REQUEST_EVENT, parseChromeMenu } from "../chrome-menu.js";
 import sessionHud, {
@@ -18,6 +21,20 @@ import sessionHud, {
 	thinkingPopupItems,
 	translateChromeMouseEvent,
 } from "../pi-session-hud.js";
+
+// The HUD resolves Pi's compaction reserve from the agent dir, so the suite gets its own.
+const agentDir = mkdtempSync(join(tmpdir(), "pi-session-hud-agent-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+const globalSettingsPath = join(agentDir, "settings.json");
+after(() => rmSync(agentDir, { recursive: true, force: true }));
+
+function writeGlobalSettings(settings: unknown) {
+	writeFileSync(globalSettingsPath, JSON.stringify(settings), "utf-8");
+}
+
+/** Tests that are not about compaction keep auto-compaction off, so the footer shows the provider window. */
+const NO_COMPACTION_SETTINGS = { compaction: { enabled: false } };
+writeGlobalSettings(NO_COMPACTION_SETTINGS);
 
 const fakeTui = {
 	requestRender() {},
@@ -199,6 +216,7 @@ function installHud(
 		hasUI: true,
 		cwd: "/tmp",
 		model,
+		isProjectTrusted: () => true,
 		getContextUsage: () => null,
 		sessionManager: { getBranch: () => [] },
 		modelRegistry: {
@@ -1000,6 +1018,23 @@ test("extension statuses yield to the weekly reset countdown instead of pushing 
 		// Compact tier: bare countdown, still ahead of any status.
 		assert.equal(hud.renderFooter(50), "░░░░░░ ? ? │ /tmp (main) 4d18h");
 	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("shows the point where Pi's own compaction triggers as the context window", async () => {
+	writeGlobalSettings({
+		compaction: {
+			reserveTokens: 16_384,
+			modelOverrides: { "openai-codex/gpt-5.6-sol": { reserveTokens: 22_000 } },
+		},
+	});
+	const hud = installHud("medium", {});
+	await hud.fire("session_start");
+	try {
+		assert.equal(hud.renderFooter(80), "░░░░░░ ? ?/250k↓ │ /tmp (main) openai-codex");
+	} finally {
+		writeGlobalSettings(NO_COMPACTION_SETTINGS);
 		await hud.fire("session_shutdown");
 	}
 });

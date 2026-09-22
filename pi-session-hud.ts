@@ -43,6 +43,12 @@ import {
 	parseChromeMenu,
 	resolveChromeMenu,
 } from "./chrome-menu.js";
+import {
+	bindingThreshold,
+	type CompactionSettingsReader,
+	nativeCompactionThreshold,
+	readCompactionSettings,
+} from "./native-compaction-limit.js";
 
 const FAST_MODE_STATUS_KEY = "fast-mode";
 const CONTEXT_BAR_WIDTH = 6;
@@ -1007,6 +1013,7 @@ export default function (pi: ExtensionAPI) {
 	// generation instead of ctx identity to detect a replaced session.
 	let sessionGeneration = 0;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
+	let compactionSettings: CompactionSettingsReader | null = null;
 	let lastRequestUsedFastMode = false;
 	let extensionFastModeActive: boolean | null = null;
 
@@ -1072,7 +1079,10 @@ export default function (pi: ExtensionAPI) {
 		const usage = ctx.getContextUsage();
 		providerContextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 		contextTokens = usage?.tokens ?? null;
-		contextWindow = effectiveContextWindow(providerContextWindow, autoCompactPolicy?.thresholdTokens);
+		contextWindow = effectiveContextWindow(providerContextWindow, bindingThreshold(
+			autoCompactPolicy?.thresholdTokens,
+			nativeCompactionThreshold(compactionSettings, ctx.model, providerContextWindow),
+		));
 		contextPercent = effectiveContextPercent(
 			usage?.percent ?? null,
 			contextTokens,
@@ -1292,6 +1302,7 @@ export default function (pi: ExtensionAPI) {
 		firstUserText = null;
 		lastRequestUsedFastMode = false;
 		extensionFastModeActive = null;
+		compactionSettings = readCompactionSettings(ctx.cwd, ctx.isProjectTrusted());
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 		pi.events.emit(CHROME_MENU_REQUEST_EVENT, { protocolVersion: 1 });
