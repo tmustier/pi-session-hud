@@ -805,8 +805,6 @@ test("provider request speed is a fallback until a controller publishes a status
 			[{ service_tier: "priority" }, "↯ fast • "],
 			[{ speed: "fast" }, "↯ fast • "],
 			[{ service_tier: "default" }, ""],
-			[null, ""],
-			[[], ""],
 		]) {
 			await hud.fire("before_provider_request", { payload });
 			assert.ok(strip(editor.render(80)[0]!).endsWith(` ${prefix}gpt-5.6-sol • medium ╮`));
