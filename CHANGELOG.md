@@ -12,6 +12,10 @@
 - Clicking the speed label now cycles the model's supported modes instead of opening or pinning its popup: Standard → Fast → Ultrafast → Standard on Astra, or Standard → Fast → Standard elsewhere. Hover still opens the mode choices. Other labels keep their existing click-to-open behaviour.
 - Keep reported-backend diagnostics visible in the footer rather than losing them when the speed label is promoted to the editor border.
 
+## [0.7.1] - 2026-09-30
+
+- Show account-wide weekly quota for `openai` ChatGPT OAuth sessions through an optional CodexBar workaround. Requires an existing CodexBar Codex connection; missing or failed readings hide the quota. API-key billing, legacy Codex and Anthropic fetching are unchanged.
+
 ## [0.7.0] - 2026-09-22
 
 ### Added

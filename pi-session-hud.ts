@@ -55,7 +55,9 @@ const CONTEXT_BAR_WIDTH = 6;
 const SESSION_FALLBACK_WORDS = 8;
 const EDITOR_GUTTER_WIDTH = 1;
 const FOOTER_GUTTER_WIDTH = EDITOR_GUTTER_WIDTH;
-const SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS = new Set(["openai-codex", "anthropic"]);
+const SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS = new Set(["openai", "openai-codex", "anthropic"]);
+// agent-default (not a user rule): 2026-09-30 — bound the optional CodexBar subprocess.
+const CODEXBAR_TIMEOUT_MS = 15_000;
 const ONE_WEEK_MINUTES = 7 * 24 * 60;
 const FIVE_HOURS_MINUTES = 5 * 60;
 const ONE_WEEK_MS = ONE_WEEK_MINUTES * 60 * 1000;
@@ -983,6 +985,39 @@ export function parseAnthropicSubscriptionUsagePayload(payload: any): Subscripti
 	return weekly ? makeSubscriptionUsage("anthropic", weekly, parseAnthropicPayloadWindow(payload?.five_hour)) : null;
 }
 
+/** Parse CodexBar's account-wide quota, not Pi's app-specific allowance. */
+export function parseCodexBarSubscriptionUsagePayload(payload: any): SubscriptionUsage | null {
+	if (!Array.isArray(payload)) return null;
+	const records = payload.filter((record) => record?.provider === "codex");
+	// Do not silently choose between multiple accounts.
+	if (records.length !== 1 || records[0].error) return null;
+	const windows = [records[0].usage?.primary, records[0].usage?.secondary].map((window) => {
+		const usedPercent = usedPercentFrom(window?.usedPercent);
+		if (usedPercent === undefined) return null;
+		const resetAtMs = typeof window.resetsAt === "string" ? Date.parse(window.resetsAt) : NaN;
+		return {
+			usedPercent,
+			windowMinutes: numberFrom(window.windowMinutes),
+			resetAtSeconds: Number.isFinite(resetAtMs) ? resetAtMs / 1000 : undefined,
+		};
+	});
+	const weekly = selectWindow(windows, ONE_WEEK_MINUTES);
+	return weekly ? makeSubscriptionUsage("openai", weekly, selectWindow(windows, FIVE_HOURS_MINUTES)) : null;
+}
+
+async function fetchCodexBarSubscriptionUsage(pi: ExtensionAPI): Promise<SubscriptionUsage | null> {
+	// HACK: hacky workaround for Pi's new openai ChatGPT OAuth flow: its token
+	// cannot query the legacy quota endpoint. Borrow CodexBar's existing Codex
+	// connection instead; no new login or credential copying. Requires CodexBar
+	// on PATH and reports its selected account's quota, which may differ from
+	// Pi's account and does not establish Pi's app-specific remaining allowance.
+	const result = await pi.exec("codexbar", ["usage", "--provider", "codex", "--source", "oauth", "--json", "--no-credits"], {
+		timeout: CODEXBAR_TIMEOUT_MS,
+	});
+	if (result.code !== 0 || result.killed) return null;
+	return parseCodexBarSubscriptionUsagePayload(JSON.parse(result.stdout));
+}
+
 async function fetchCodexSubscriptionUsage(ctx: ExtensionContext): Promise<SubscriptionUsage | null> {
 	const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
 	if (!token) return null;
@@ -1137,13 +1172,21 @@ export default function (pi: ExtensionAPI) {
 
 		lastSubscriptionProbeAt = Date.now();
 		const generation = sessionGeneration;
-		const usage = await (provider === "anthropic"
-			? fetchAnthropicSubscriptionUsage(ctx)
-			: fetchCodexSubscriptionUsage(ctx)
+		const usage = await (provider === "openai"
+			? fetchCodexBarSubscriptionUsage(pi)
+			: provider === "anthropic"
+				? fetchAnthropicSubscriptionUsage(ctx)
+				: fetchCodexSubscriptionUsage(ctx)
 		).catch(() => null);
 		// A probe started before a model switch must not overwrite the new provider's quota.
 		if (disposed || generation !== sessionGeneration || provider !== currentCtx?.model?.provider) return;
-		updateSubscriptionUsage(usage);
+		// A missing/failed optional CodexBar must not leave its last quota looking current.
+		if (provider === "openai" && !usage) {
+			latestSubscriptionUsage = null;
+			requestChromeRender();
+		} else {
+			updateSubscriptionUsage(usage);
+		}
 	}
 
 	async function refreshGit(ctx: ExtensionContext | null = currentCtx) {
