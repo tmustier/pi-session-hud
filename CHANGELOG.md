@@ -1,6 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.2] - 2026-09-30
+
+### Added
+
+- Distinct `↯ fast` and `↯ ultrafast` indicators, including extension statuses with reported-backend metadata and Ultrafast request payloads.
+- A model-specific speed popup when the controlling extension publishes a `fast-mode` Chrome menu. It appears before the model and delegates selection and persistence to that extension. Legacy extensions remain read-only.
+
+### Fixed
+
+- Clicking the speed label now cycles the model's supported modes instead of opening or pinning its popup: Standard → Fast → Ultrafast → Standard on Astra, or Standard → Fast → Standard elsewhere. Hover still opens the mode choices. Other labels keep their existing click-to-open behaviour.
+- Keep reported-backend diagnostics visible in the footer rather than losing them when the speed label is promoted to the editor border.
 
 ## [0.7.1] - 2026-09-30
 
