@@ -5,7 +5,7 @@
 ![Session HUD editor chrome and footer](https://raw.githubusercontent.com/tmustier/pi-session-hud/main/assets/hud-chrome.png)
 
 ```text
-╭───────────────────────────── ↯ • gpt-5.6-sol • medium ╮
+╭────────────────────── ↯ ultrafast • gpt-6-astra • medium ╮
 │ prompt text wraps inside a one-column gutter              │
 ╰────────────────────────────────────────────── 44% left ╯
  ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     openai-codex weekly reset in 3d04h
@@ -21,11 +21,11 @@ The footer line, left to right:
 - current working directory and git branch
 - git diff stats (`+x -y`, or `~` when dirty); git-crypt repositories show dirty state without line counts
 - session name, or the first few words of the first user message when unnamed
-- right edge: active extension statuses followed by provider detail, for example `openai-codex weekly reset in 3d04h`, or just the provider name on API-key billing; an active `fast-mode` status is promoted to the editor-border lightning symbol instead of duplicated here
+- right edge: active extension statuses followed by provider detail, for example `openai-codex weekly reset in 3d04h`, or just the provider name on API-key billing; a Fast or Ultrafast status is promoted to the editor border instead of duplicated here
 
 The editor border:
 
-- top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when fast mode is active, the single-column lightning symbol `↯` appears first. Like Pi's own footer, reasoning models show `thinking off` when thinking is off, and models without thinking support show only the model id
+- top right: current model and thinking level, for example `gpt-5.6-sol • medium`; when acceleration is active, `↯ fast` or `↯ ultrafast` appears first. Like Pi's own footer, reasoning models show `thinking off` when thinking is off, and models without thinking support show only the model id
 - in Pi's fullscreen TUI mode (`--tui-mode fullscreen` or the `tuiMode` setting), both labels open a small popup above the input box:
   - the model id lists the session's scoped models (`--models` or the `enabledModels` setting, the same set as `/scoped-models`) with the current one checked, plus `Other…`, which opens Pi's full model selector on the all scope; with no scope configured a click goes straight to Pi's selector
   - the thinking level lists the levels the current model supports, with the current one checked
@@ -87,7 +87,9 @@ How to read the numbers:
 - the HUD keeps Pi's provider context window when no limit binds below it: auto-compaction disabled, no auto-compact policy, or a reserve and threshold that leave the full window usable
 - `?` in the context slot means Pi has no fresh usage data yet, for example right after compaction
 - named sessions render white; the unnamed fallback (first words of your first message) renders muted grey
-- `↯` means fast mode is active: the HUD reads Pi's standard `fast-mode` extension status immediately and also passively observes serialized requests containing `service_tier: "priority"` or `speed: "fast"` as a fallback; it never enables or modifies fast mode
+- `↯ fast` and `↯ ultrafast` distinguish the selected processing modes. The HUD reads the `fast-mode` extension status immediately, including statuses with reported-backend metadata, and passively observes `service_tier: "priority"`, `service_tier: "ultrafast"` or `speed: "fast"` as a fallback. A status marked `n/a` is not shown as accelerated
+- with Vibes' owned fast-mode extension loaded, the speed label (`standard`, `↯ fast` or `↯ ultrafast`) opens a popup in fullscreen mode. Choose Standard, Fast or Ultrafast; the controlling extension supplies only the modes supported by the current model. Astra offers all three; other supported OpenAI models offer Standard and Fast. The choice updates `/fast` and its saved setting immediately
+- the HUD does not send speed patches or maintain a second speed setting. Without a controlling extension's Chrome menu, the indicator is read-only; older fast-mode extensions continue to work
 - the standard extension-status path is independent of package and request-hook order; payload-only integrations update the indicator on the next provider request and still need their payload patch to run before the HUD's observation hook
 - `44% left` is your weekly subscription quota remaining; it appears when Pi is authenticated via OpenAI Codex or Anthropic subscription OAuth
 - quota comes from a background probe of the provider usage endpoint at session start, after model switches, and every 5 minutes, plus provider rate-limit headers on each response when the transport exposes them (OpenAI Codex only does so on the SSE transport, not the default WebSocket transport); if neither is available the metric simply stays absent
@@ -132,6 +134,7 @@ export default function (pi: ExtensionAPI) {
 - `extend: "model"` or `extend: "thinking"` appends the rows to that built-in popup instead; `onSelect` still receives the row's own `value`
 - `{ protocolVersion: 1, id, remove: true }` withdraws a menu
 - malformed payloads are ignored; the HUD re-renders the border whenever a menu changes
+- the reserved `fast-mode` menu is placed before the model id, replaces the passive speed indicator and suppresses the duplicate footer status; its controller remains responsible for supported choices and persistence
 
 On narrow terminals the footer collapses gracefully: context + repo/branch/diff survive first, then the session label; the right-side reset detail shrinks to just the countdown (`3d04h`) and then disappears.
 

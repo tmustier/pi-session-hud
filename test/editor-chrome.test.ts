@@ -78,7 +78,7 @@ const plainModel = { id: "gpt-5.6-sol", reasoning: false };
 
 test("label segments mark only the model id and thinking level as clickable", () => {
 	assert.deepEqual(modelLabelSegments(reasoningModel, "medium", true), [
-		{ text: "↯ • " },
+		{ text: "↯ fast • " },
 		{ text: "gpt-5.6-sol", target: "model" },
 		{ text: " • " },
 		{ text: "medium", target: "thinking" },
@@ -770,6 +770,47 @@ test("another extension can add its own label and popup to the chrome over pi.ev
 		assert.equal(hud.popups.length, 1);
 		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "pi-dial", remove: true });
 		assert.match(strip(editor.render(60)[0]!), /─ gpt-5\.6-sol • medium ╮$/);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("speed menu is promoted before the model without duplicate status, and selecting a tier updates it", async () => {
+	const hud = installHud("medium");
+	await hud.fire("session_start");
+	let mode = "off";
+	const selected: string[] = [];
+	const publish = () => hud.bus.emit(CHROME_MENU_EVENT, {
+		protocolVersion: 1, id: "fast-mode", title: "Speed",
+		label: mode === "off" ? "standard" : `↯ ${mode}`,
+		items: [{ value: "off", label: "Standard" }, { value: "fast", label: "Fast" }, { value: "ultrafast", label: "Ultrafast" }],
+		current: mode,
+		onSelect: (value: string) => { mode = value; selected.push(value); publish(); },
+	});
+	publish();
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		const line = strip(editor.render(80)[0]!);
+		assert.match(line, /standard • gpt-5\.6-sol • medium/);
+		const x = line.indexOf("standard") + 2;
+		editor.handleMouse(mouse({ x, y: 0, width: 80 }));
+		await settle();
+		const popup = hud.popups.at(-1)!.component;
+		assert.match(strip(popup.render(50)[0]!), /Speed/);
+		popup.handleInput("\x1b[B");
+		popup.handleInput("\x1b[B");
+		popup.handleInput("\r");
+		await settle();
+		assert.deepEqual(selected, ["ultrafast"]);
+		assert.match(strip(editor.render(80)[0]!), /↯ ultrafast • gpt-5\.6-sol • medium/);
+		hud.statuses.set("fast-mode", "⚡ ultrafast");
+		assert.doesNotMatch(hud.renderFooter(120), /ultrafast/);
+		hud.statuses.set("fast-mode", "⚡ ultrafast (reported: default)");
+		assert.match(hud.renderFooter(200), /reported: default/);
+		assert.equal(strip(editor.render(80)[0]!).match(/ultrafast/g)?.length, 1);
+		for (const width of [30, 40, 60, 80]) {
+			for (const rendered of editor.render(width)) assert.ok(strip(rendered).length <= width);
+		}
 	} finally {
 		await hud.fire("session_shutdown");
 	}

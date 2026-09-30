@@ -1,43 +1,46 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { fastModeFromExtensionStatuses, formatModelLabel, requestUsesFastMode } from "../pi-session-hud.js";
+import { fastModeFromExtensionStatuses, formatModelLabel, requestUsesFastMode, requestSpeedMode, speedModeFromExtensionStatuses } from "../pi-session-hud.js";
 
-const reasoningModel = { id: "gpt-5.6-sol", reasoning: true };
-const plainModel = { id: "gpt-5.6-sol", reasoning: false };
+const reasoningModel = { id: "gpt-6-astra", reasoning: true };
+const plainModel = { id: "gpt-6-astra", reasoning: false };
 
-test("adds a single-column text lightning glyph before the model while fast mode is active", () => {
-	const label = formatModelLabel(reasoningModel, "medium", true);
-	assert.equal(label, "↯ • gpt-5.6-sol • medium");
-	assert.equal(formatModelLabel(plainModel, "off", true), "↯ • gpt-5.6-sol");
+test("distinguishes Fast and Ultrafast with a single-column text lightning glyph", () => {
+	const label = formatModelLabel(reasoningModel, "medium", "fast");
+	assert.equal(label, "↯ fast • gpt-6-astra • medium");
+	assert.equal(formatModelLabel(plainModel, "off", true), "↯ fast • gpt-6-astra");
+	assert.equal(formatModelLabel(reasoningModel, "medium", "ultrafast"), "↯ ultrafast • gpt-6-astra • medium");
 	assert.equal(visibleWidth(label), [...label].length);
 });
 
-test("keeps the existing model label while fast mode is inactive", () => {
-	assert.equal(formatModelLabel(reasoningModel, "medium", false), "gpt-5.6-sol • medium");
+test("keeps the model label when speed is off and retains thinking off", () => {
+	assert.equal(formatModelLabel(reasoningModel, "medium", false), "gpt-6-astra • medium");
+	assert.equal(formatModelLabel(reasoningModel, "medium", "off"), "gpt-6-astra • medium");
+	assert.equal(formatModelLabel(reasoningModel, "off", false), "gpt-6-astra • thinking off");
+	assert.equal(formatModelLabel(plainModel, "medium", false), "gpt-6-astra");
 });
 
-test("shows thinking off on reasoning models and nothing on models without thinking", () => {
-	assert.equal(formatModelLabel(reasoningModel, "off", false), "gpt-5.6-sol • thinking off");
-	assert.equal(formatModelLabel(plainModel, "medium", false), "gpt-5.6-sol");
-});
-
-test("recognizes fast mode from extension status without depending on request-hook order", () => {
-	assert.equal(fastModeFromExtensionStatuses(new Map([["fast-mode", "⚡ fast"]])), true);
-	assert.equal(fastModeFromExtensionStatuses(new Map([["fast-mode", "\x1b[33m⚡\x1b[0m\x1b[2m fast\x1b[0m"]])), true);
+test("recognizes both tiers from extension status, including reported backend metadata", () => {
+	for (const status of ["⚡ fast", "\x1b[33m⚡\x1b[0m\x1b[2m fast\x1b[0m", "⚡ fast (reported: priority)"]) {
+		assert.equal(speedModeFromExtensionStatuses(new Map([["fast-mode", status]])), "fast");
+	}
+	assert.equal(speedModeFromExtensionStatuses(new Map([["fast-mode", "⚡ ultrafast (reported: default)"]])), "ultrafast");
+	assert.equal(fastModeFromExtensionStatuses(new Map([["fast-mode", "⚡ ultrafast"]])), true);
+	for (const status of ["⚡ n/a", "⚡ ultrafast n/a", "⚡ fast n/a", "unrelated"]) {
+		assert.equal(speedModeFromExtensionStatuses(new Map([["fast-mode", status]])), "off");
+	}
 	assert.equal(fastModeFromExtensionStatuses(new Map([["fast-mode", "⚡ n/a"]])), false);
-	assert.equal(fastModeFromExtensionStatuses(new Map()), null);
+	assert.equal(speedModeFromExtensionStatuses(new Map()), null);
 });
 
-test("recognizes fast mode from the serialized provider request", () => {
-	assert.equal(requestUsesFastMode({ service_tier: "priority" }), true);
-	assert.equal(requestUsesFastMode({ speed: "fast" }), true);
-});
-
-test("does not infer fast mode from unrelated or malformed payloads", () => {
-	assert.equal(requestUsesFastMode({ service_tier: "default" }), false);
-	assert.equal(requestUsesFastMode({ speed: "standard" }), false);
-	assert.equal(requestUsesFastMode({ fast: true }), false);
-	assert.equal(requestUsesFastMode(null), false);
-	assert.equal(requestUsesFastMode([]), false);
+test("recognizes the requested tier without inferring it from unrelated payloads", () => {
+	assert.equal(requestSpeedMode({ service_tier: "ultrafast" }), "ultrafast");
+	assert.equal(requestSpeedMode({ service_tier: "priority" }), "fast");
+	assert.equal(requestSpeedMode({ speed: "fast" }), "fast");
+	assert.equal(requestUsesFastMode({ service_tier: "ultrafast" }), true);
+	for (const payload of [{ service_tier: "default" }, { speed: "standard" }, { fast: true }, null, []]) {
+		assert.equal(requestSpeedMode(payload), "off");
+		assert.equal(requestUsesFastMode(payload), false);
+	}
 });

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Distinct `↯ fast` and `↯ ultrafast` indicators, including extension statuses with reported-backend metadata and Ultrafast request payloads.
+- A model-specific speed popup when the controlling extension publishes a `fast-mode` Chrome menu. It appears before the model and delegates selection and persistence to that extension. Legacy extensions remain read-only.
+
+### Fixed
+
+- Keep reported-backend diagnostics visible in the footer rather than losing them when the speed label is promoted to the editor border.
+
 ## [0.7.0] - 2026-09-22
 
 ### Added

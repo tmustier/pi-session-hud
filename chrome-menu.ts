@@ -22,7 +22,7 @@ export type ChromeMenu = {
 	protocolVersion: 1;
 	/** Stable key, typically the extension name. */
 	id: string;
-	/** Segment text in the input border, after the thinking level. Omit when only extending a built-in popup. */
+	/** Segment text after thinking, except reserved id `fast-mode` before the model. Omit when only extending a built-in popup. */
 	label?: string;
 	/** Popup title; defaults to the label or id. */
 	title?: string;

@@ -338,16 +338,31 @@ function stripAnsi(text: string): string {
 		.replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "");
 }
 
-export function fastModeFromExtensionStatuses(statuses: ReadonlyMap<string, string>): boolean | null {
+export type SpeedMode = "off" | "fast" | "ultrafast";
+
+export function speedModeFromExtensionStatuses(statuses: ReadonlyMap<string, string>): SpeedMode | null {
 	const status = statuses.get(FAST_MODE_STATUS_KEY);
 	if (status === undefined) return null;
-	return stripAnsi(status).trim().toLowerCase() === "⚡ fast";
+	const text = stripAnsi(status).trim().toLowerCase();
+	if (/\bn\/a\b/.test(text)) return "off";
+	const match = text.match(/^⚡ (ultrafast|fast)(?:\s|$)/);
+	return match ? match[1] as SpeedMode : "off";
+}
+
+export function fastModeFromExtensionStatuses(statuses: ReadonlyMap<string, string>): boolean | null {
+	const mode = speedModeFromExtensionStatuses(statuses);
+	return mode === null ? null : mode !== "off";
+}
+
+export function requestSpeedMode(payload: unknown): SpeedMode {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return "off";
+	const request = payload as Record<string, unknown>;
+	if (request.service_tier === "ultrafast") return "ultrafast";
+	return request.service_tier === "priority" || request.speed === "fast" ? "fast" : "off";
 }
 
 export function requestUsesFastMode(payload: unknown): boolean {
-	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
-	const request = payload as Record<string, unknown>;
-	return request.service_tier === "priority" || request.speed === "fast";
+	return requestSpeedMode(payload) !== "off";
 }
 
 export interface LabelModel {
@@ -368,23 +383,30 @@ export function menuIdFromTarget(target: ChromeTarget): string | undefined {
 export function modelLabelSegments(
 	model: LabelModel,
 	thinking: string,
-	fastModeActive: boolean,
+	fastModeActive: boolean | SpeedMode,
 	menus: readonly MenuLabel[] = [],
 ): LabelSegment[] {
 	const segments: LabelSegment[] = [];
-	// Use a single-column text glyph so the TUI and terminal agree on border width.
-	if (fastModeActive) segments.push({ text: "↯ • " });
+	const speedMenu = menus.find((menu) => menu.id === FAST_MODE_STATUS_KEY);
+	// The controlling extension supplies the choices; the HUD never owns the speed setting.
+	if (speedMenu) {
+		segments.push({ text: speedMenu.label, ...(speedMenu.clickable ? { target: menuTarget(speedMenu.id) } : {}) }, { text: " • " });
+	} else if (fastModeActive && fastModeActive !== "off") {
+		// Use a single-column text glyph so the TUI and terminal agree on border width.
+		segments.push({ text: `↯ ${fastModeActive === "ultrafast" ? "ultrafast" : "fast"} • ` });
+	}
 	segments.push({ text: model.id, target: "model" });
 	// Match Pi's footer: only reasoning models get a thinking segment, and "off" stays
 	// visible so a click can turn thinking back on.
 	if (model.reasoning) segments.push({ text: " • " }, { text: thinking === "off" ? "thinking off" : thinking, target: "thinking" });
 	for (const menu of menus) {
+		if (menu.id === FAST_MODE_STATUS_KEY) continue;
 		segments.push({ text: " • " }, { text: menu.label, ...(menu.clickable ? { target: menuTarget(menu.id) } : {}) });
 	}
 	return segments;
 }
 
-export function formatModelLabel(model: LabelModel, thinking: string, fastModeActive: boolean, menus: readonly MenuLabel[] = []): string {
+export function formatModelLabel(model: LabelModel, thinking: string, fastModeActive: boolean | SpeedMode, menus: readonly MenuLabel[] = []): string {
 	return modelLabelSegments(model, thinking, fastModeActive, menus).map((segment) => segment.text).join("");
 }
 
@@ -1014,8 +1036,8 @@ export default function (pi: ExtensionAPI) {
 	let sessionGeneration = 0;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
 	let compactionSettings: CompactionSettingsReader | null = null;
-	let lastRequestUsedFastMode = false;
-	let extensionFastModeActive: boolean | null = null;
+	let lastRequestUsedFastMode: SpeedMode = "off";
+	let extensionFastModeActive: SpeedMode | null = null;
 
 	function selectedModelIdentity(ctx: ExtensionContext | null): ModelIdentity | undefined {
 		const model = ctx?.model;
@@ -1181,18 +1203,25 @@ export default function (pi: ExtensionAPI) {
 
 	function syncExtensionStatuses(footerData: ReadonlyFooterDataProvider): string[] {
 		const statuses = footerData.getExtensionStatuses();
-		const observedFastMode = fastModeFromExtensionStatuses(statuses);
+		const observedFastMode = speedModeFromExtensionStatuses(statuses);
 		const previousFastMode = extensionFastModeActive;
 		if (observedFastMode !== null) extensionFastModeActive = observedFastMode;
-		else if (extensionFastModeActive !== null) extensionFastModeActive = false;
+		else if (extensionFastModeActive !== null) extensionFastModeActive = "off";
 		if (extensionFastModeActive !== previousFastMode) editorTui?.requestRender();
 
 		return [...statuses.entries()]
-			.filter(([key, value]) => value && (key !== FAST_MODE_STATUS_KEY || observedFastMode !== true))
+			.filter(([key, value]) => {
+				if (!value) return false;
+				if (key !== FAST_MODE_STATUS_KEY) return true;
+				const text = stripAnsi(value).trim().toLowerCase();
+				if (/^⚡ (?:fast|ultrafast)$/.test(text)) return false;
+				// Keep backend diagnostics; only dedupe n/a when the controlling menu shows it.
+				return !chromeMenus.get(FAST_MODE_STATUS_KEY)?.label || !/^⚡ (?:fast|ultrafast) n\/a$/.test(text);
+			})
 			.map(([, value]) => normalizeText(value));
 	}
 
-	function updateFastModeObservation(next: boolean) {
+	function updateFastModeObservation(next: SpeedMode) {
 		if (next === lastRequestUsedFastMode) return;
 		lastRequestUsedFastMode = next;
 		if (!disposed) editorTui?.requestRender();
@@ -1300,7 +1329,7 @@ export default function (pi: ExtensionAPI) {
 		sessionGeneration++;
 		currentCtx = ctx;
 		firstUserText = null;
-		lastRequestUsedFastMode = false;
+		lastRequestUsedFastMode = "off";
 		extensionFastModeActive = null;
 		compactionSettings = readCompactionSettings(ctx.cwd, ctx.isProjectTrusted());
 		refreshContext(ctx);
@@ -1688,7 +1717,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_start", async (_event, ctx) => { refreshAndRender(ctx); });
 	pi.on("before_provider_request", (event, ctx) => {
 		currentCtx = ctx;
-		updateFastModeObservation(requestUsesFastMode(event.payload));
+		updateFastModeObservation(requestSpeedMode(event.payload));
 	});
 	pi.on("agent_end", async (_event, ctx) => {
 		refreshAndRender(ctx);
@@ -1706,7 +1735,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("thinking_level_select", async () => { requestChromeRender(); });
 	pi.on("model_select", async (_event, ctx) => {
 		currentCtx = ctx;
-		lastRequestUsedFastMode = false;
+		lastRequestUsedFastMode = "off";
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 		if (latestSubscriptionUsage?.provider !== ctx.model?.provider) latestSubscriptionUsage = null;
