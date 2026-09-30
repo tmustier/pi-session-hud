@@ -32,6 +32,8 @@ export type ChromeMenu = {
 	current?: string | (() => string | undefined);
 	/** Append the rows to a built-in popup instead of (or as well as) the menu's own popup. */
 	extend?: ChromeMenuExtend;
+	/** Handle a label click directly instead of pinning its popup; hovering still previews the rows. */
+	onClick?: () => void | Promise<void>;
 	onSelect?: (value: string) => void | Promise<void>;
 };
 
@@ -65,12 +67,13 @@ export function parseChromeMenuItems(value: unknown): ChromeMenuItem[] {
 export function parseChromeMenu(value: unknown): ChromeMenu | ChromeMenuRemoval | undefined {
 	if (!isRecord(value) || value.protocolVersion !== 1 || typeof value.id !== "string" || value.id === "") return undefined;
 	if (value.remove === true) return { protocolVersion: 1, id: value.id, remove: true };
-	const { label, title, items, current, extend, onSelect } = value;
+	const { label, title, items, current, extend, onClick, onSelect } = value;
 	if (label !== undefined && typeof label !== "string") return undefined;
 	if (title !== undefined && typeof title !== "string") return undefined;
 	if (items !== undefined && typeof items !== "function" && !Array.isArray(items)) return undefined;
 	if (current !== undefined && typeof current !== "string" && typeof current !== "function") return undefined;
 	if (extend !== undefined && extend !== "model" && extend !== "thinking") return undefined;
+	if (onClick !== undefined && typeof onClick !== "function") return undefined;
 	if (onSelect !== undefined && typeof onSelect !== "function") return undefined;
 	return {
 		protocolVersion: 1,
@@ -80,6 +83,7 @@ export function parseChromeMenu(value: unknown): ChromeMenu | ChromeMenuRemoval 
 		...(items !== undefined ? { items: Array.isArray(items) ? parseChromeMenuItems(items) : (items as () => ChromeMenuItem[]) } : {}),
 		...(current !== undefined ? { current: current as string | (() => string | undefined) } : {}),
 		...(extend !== undefined ? { extend } : {}),
+		...(onClick !== undefined ? { onClick: onClick as ChromeMenu["onClick"] } : {}),
 		...(onSelect !== undefined ? { onSelect: onSelect as ChromeMenu["onSelect"] } : {}),
 	};
 }

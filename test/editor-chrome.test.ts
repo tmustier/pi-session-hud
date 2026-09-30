@@ -816,6 +816,72 @@ test("speed menu is promoted before the model without duplicate status, and sele
 	}
 });
 
+test("clicking the speed label toggles immediately, including an open hover preview", async () => {
+	const hud = installHud("medium");
+	await hud.fire("session_start");
+	let mode = "ultrafast";
+	let clicks = 0;
+	const publish = () => hud.bus.emit(CHROME_MENU_EVENT, {
+		protocolVersion: 1, id: "fast-mode", title: "Speed",
+		label: mode === "off" ? "standard" : `↯ ${mode}`,
+		items: [{ value: "off", label: "Standard" }, { value: "fast", label: "Fast" }, { value: "ultrafast", label: "Ultrafast" }],
+		current: mode,
+		onClick: () => { clicks++; mode = mode === "off" ? "fast" : "off"; publish(); },
+		onSelect: (value: string) => { mode = value; publish(); },
+	});
+	publish();
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		const atLabel = (type: "click" | "move") => {
+			const line = strip(editor.render(80)[0]!);
+			return mouse({ type, button: type === "move" ? "none" : "left", x: line.indexOf(mode === "off" ? "standard" : `↯ ${mode}`) + 2, y: 0, width: 80 });
+		};
+		editor.handleMouse(atLabel("click"));
+		await settle();
+		assert.equal(mode, "off");
+		assert.equal(hud.popups.length, 0);
+		editor.handleMouse(atLabel("move"));
+		editor.handleMouse(atLabel("click"));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(mode, "fast");
+		assert.equal(hud.popups.length, 0, "click cancels a pending hover menu");
+		editor.handleMouse(atLabel("move"));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		assert.equal(hud.popups.length, 1);
+		assert.equal(hud.popups[0]!.component.focused, false);
+		editor.handleMouse(atLabel("click"));
+		await settle();
+		assert.equal(mode, "off");
+		assert.equal(clicks, 3);
+		assert.equal(hud.popups[0]!.component.isClosed, true, "click toggles rather than pinning a preview");
+		editor.handleMouse(atLabel("move"));
+		await wait(HOVER_OPEN_DELAY_MS + 20);
+		const popup = hud.popups.at(-1)!.component;
+		popup.handleMouse(mouse({ x: 5, y: 3, width: 50, height: 5 }));
+		await settle();
+		assert.equal(mode, "ultrafast", "the hover menu still selects an explicit mode");
+		assert.equal(clicks, 3);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("direct-click-only labels are hotspots and callback failures are reported", async () => {
+	const hud = installHud("medium");
+	await hud.fire("session_start");
+	hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "fast-mode", label: "standard", onClick: async () => { throw new Error("toggle failed"); } });
+	try {
+		const editor = hud.editorFactory()(fakeTui, {}, {});
+		const line = strip(editor.render(80)[0]!);
+		editor.handleMouse(mouse({ x: line.indexOf("standard") + 2, y: 0, width: 80 }));
+		await settle();
+		assert.deepEqual(hud.notices, ["toggle failed"]);
+		assert.equal(hud.popups.length, 0);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
 test("a label without rows is informational only, and malformed menus are ignored", async () => {
 	const hud = installHud("medium");
 	await hud.fire("session_start");
@@ -874,6 +940,9 @@ test("an extension can append rows to the built-in model popup and receives thei
 test("chrome menu payloads are validated", () => {
 	assert.equal(parseChromeMenu({ protocolVersion: 1, id: "x", extend: "footer" }), undefined);
 	assert.equal(parseChromeMenu({ protocolVersion: 1, id: "x", onSelect: "nope" }), undefined);
+	assert.equal(parseChromeMenu({ protocolVersion: 1, id: "x", onClick: "nope" }), undefined);
+	const onClick = () => {};
+	assert.deepEqual(parseChromeMenu({ protocolVersion: 1, id: "x", onClick }), { protocolVersion: 1, id: "x", onClick });
 	assert.deepEqual(parseChromeMenu({ protocolVersion: 1, id: "x", remove: true }), { protocolVersion: 1, id: "x", remove: true });
 	const parsed = parseChromeMenu({ protocolVersion: 1, id: "x", label: "L", items: [{ value: "a", label: "A" }, { value: 1, label: "bad" }, "junk"] });
 	assert.deepEqual(parsed, { protocolVersion: 1, id: "x", label: "L", items: [{ value: "a", label: "A" }] });

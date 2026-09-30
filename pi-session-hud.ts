@@ -1073,7 +1073,7 @@ export default function (pi: ExtensionAPI) {
 	function chromeMenuLabels(): MenuLabel[] {
 		const labels: MenuLabel[] = [];
 		for (const menu of chromeMenus.values()) {
-			if (menu.label) labels.push({ id: menu.id, label: menu.label, clickable: typeof menu.items === "function" || (menu.items?.length ?? 0) > 0 });
+			if (menu.label) labels.push({ id: menu.id, label: menu.label, clickable: typeof menu.onClick === "function" || typeof menu.items === "function" || (menu.items?.length ?? 0) > 0 });
 		}
 		return labels;
 	}
@@ -1595,6 +1595,16 @@ export default function (pi: ExtensionAPI) {
 					const target = chromeTargetForEvent(layout, event);
 					if (target) {
 						cancelHoverOpen();
+						const menuId = menuIdFromTarget(target);
+						const onClick = menuId === undefined ? undefined : chromeMenus.get(menuId)?.onClick;
+						if (onClick) {
+							cancelHoverLeave();
+							activePopup?.close();
+							Promise.resolve().then(() => onClick()).catch((err: unknown) => {
+								if (!isStaleExtensionError(err)) currentCtx?.ui.notify(err instanceof Error ? err.message : String(err), "error");
+							});
+							return { handled: true };
+						}
 						// A hotspot press does not move focus, so an open popup survives until here:
 						// a hover popup pins, a pinned one toggles closed, the other label swaps.
 						const open = activePopup;

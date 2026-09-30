@@ -88,7 +88,7 @@ How to read the numbers:
 - `?` in the context slot means Pi has no fresh usage data yet, for example right after compaction
 - named sessions render white; the unnamed fallback (first words of your first message) renders muted grey
 - `↯ fast` and `↯ ultrafast` distinguish the selected processing modes. The HUD reads the `fast-mode` extension status immediately, including statuses with reported-backend metadata, and passively observes `service_tier: "priority"`, `service_tier: "ultrafast"` or `speed: "fast"` as a fallback. A status marked `n/a` is not shown as accelerated
-- with Vibes' owned fast-mode extension loaded, the speed label (`standard`, `↯ fast` or `↯ ultrafast`) opens a popup in fullscreen mode. Choose Standard, Fast or Ultrafast; the controlling extension supplies only the modes supported by the current model. Astra offers all three; other supported OpenAI models offer Standard and Fast. The choice updates `/fast` and its saved setting immediately
+- with Vibes' owned fast-mode extension loaded, clicking the speed label (`standard`, `↯ fast` or `↯ ultrafast`) toggles acceleration on or off, like `/fast`. Hover the label to open the Speed popup and click a row to choose Standard, Fast or Ultrafast; the controlling extension supplies only the modes supported by the current model. Astra offers all three; other supported OpenAI models offer Standard and Fast. The choice updates `/fast` and its saved setting immediately
 - the HUD does not send speed patches or maintain a second speed setting. Without a controlling extension's Chrome menu, the indicator is read-only; older fast-mode extensions continue to work
 - the standard extension-status path is independent of package and request-hook order; payload-only integrations update the indicator on the next provider request and still need their payload patch to run before the HUD's observation hook
 - `44% left` is your weekly subscription quota remaining; it appears when Pi is authenticated via OpenAI Codex or Anthropic subscription OAuth
@@ -99,7 +99,7 @@ The HUD and auto-compact communicate through Pi's shared extension event bus. Th
 
 Git state refreshes at session start and after each agent run, not while idle.
 
-Mouse clicks are only delivered in Pi's fullscreen TUI mode; in regular mode the terminal owns the scrollback and Pi does not capture mouse input. Hover needs pointer-motion reporting, which Pi turns off inside tmux, zellij and screen to keep those multiplexers responsive; there the popups still open on click.
+Mouse clicks are only delivered in Pi's fullscreen TUI mode; in regular mode the terminal owns the scrollback and Pi does not capture mouse input. Hover needs pointer-motion reporting, which Pi turns off inside tmux, zellij and screen to keep those multiplexers responsive; there the model and thinking popups still open on click. The speed label still toggles on click; use `/fast on`, `/fast off` or `/fast ultrafast` to choose a mode when hover is unavailable.
 
 ## Chrome menus for other extensions
 
@@ -130,7 +130,8 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-- a label without `items` is informational: it is drawn but not clickable
+- `onClick` handles a label click directly instead of pinning its popup; hovering still previews the rows. Vibes uses it for the speed toggle
+- a label without `items` or `onClick` is informational: it is drawn but not clickable
 - `extend: "model"` or `extend: "thinking"` appends the rows to that built-in popup instead; `onSelect` still receives the row's own `value`
 - `{ protocolVersion: 1, id, remove: true }` withdraws a menu
 - malformed payloads are ignored; the HUD re-renders the border whenever a menu changes
