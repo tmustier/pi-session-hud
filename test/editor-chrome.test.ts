@@ -76,27 +76,18 @@ function layout(overrides: Partial<ChromeLayout> = {}): ChromeLayout {
 const reasoningModel = { id: "gpt-5.6-sol", reasoning: true };
 const plainModel = { id: "gpt-5.6-sol", reasoning: false };
 
-test("label segments mark only the model id and thinking level as clickable", () => {
-	assert.deepEqual(modelLabelSegments(reasoningModel, "medium", true), [
-		{ text: "↯ fast • " },
-		{ text: "gpt-5.6-sol", target: "model" },
-		{ text: " • " },
-		{ text: "medium", target: "thinking" },
-	]);
-});
-
 test("thinking off stays visible and clickable on reasoning models, like Pi's footer", () => {
-	assert.deepEqual(modelLabelSegments(reasoningModel, "off", false), [
+	assert.deepEqual(modelLabelSegments(reasoningModel, "off", "off"), [
 		{ text: "gpt-5.6-sol", target: "model" },
 		{ text: " • " },
 		{ text: "thinking off", target: "thinking" },
 	]);
-	assert.deepEqual(modelLabelSegments(plainModel, "off", false), [{ text: "gpt-5.6-sol", target: "model" }]);
-	assert.deepEqual(modelLabelSegments(plainModel, "medium", false), [{ text: "gpt-5.6-sol", target: "model" }]);
+	assert.deepEqual(modelLabelSegments(plainModel, "off", "off"), [{ text: "gpt-5.6-sol", target: "model" }]);
+	assert.deepEqual(modelLabelSegments(plainModel, "medium", "off"), [{ text: "gpt-5.6-sol", target: "model" }]);
 });
 
 test("hotspots follow segment widths from the label start and clip at the visible limit", () => {
-	const segments = modelLabelSegments(reasoningModel, "medium", false);
+	const segments = modelLabelSegments(reasoningModel, "medium", "off");
 	assert.deepEqual(labelHotspots(segments, 0, 38, 59), [
 		{ row: 0, start: 38, end: 49, target: "model" },
 		{ row: 0, start: 52, end: 58, target: "thinking" },
@@ -111,7 +102,7 @@ test("hotspots follow segment widths from the label start and clip at the visibl
 
 test("chrome targets resolve on their own border row only", () => {
 	const hotspots = [
-		...labelHotspots(modelLabelSegments(reasoningModel, "medium", false), 0, 38, 59),
+		...labelHotspots(modelLabelSegments(reasoningModel, "medium", "off"), 0, 38, 59),
 		...labelHotspots([{ text: "44% left", target: "usage" }], 2, 50, 58),
 	];
 	const chrome = layout({ hotspots });
@@ -248,9 +239,9 @@ function installHud(
 	});
 
 	sessionHud(pi as any);
-	const fire = async (event: string) => {
+	const fire = async (event: string, data: unknown = {}) => {
 		const ctx = createCtx();
-		for (const handler of handlers.get(event) ?? []) await handler({}, ctx);
+		for (const handler of handlers.get(event) ?? []) await handler(data, ctx);
 	};
 	const selectModel = async (next: typeof model) => {
 		model = next;
@@ -775,99 +766,124 @@ test("another extension can add its own label and popup to the chrome over pi.ev
 	}
 });
 
-test("speed menu is promoted before the model without duplicate status, and selecting a tier updates it", async () => {
+test("speed statuses promote supported tiers but retain backend reports and unsupported diagnostics in the footer", async () => {
 	const hud = installHud("medium");
 	await hud.fire("session_start");
-	let mode = "off";
-	const selected: string[] = [];
-	const publish = () => hud.bus.emit(CHROME_MENU_EVENT, {
-		protocolVersion: 1, id: "fast-mode", title: "Speed",
-		label: mode === "off" ? "standard" : `↯ ${mode}`,
-		items: [{ value: "off", label: "Standard" }, { value: "fast", label: "Fast" }, { value: "ultrafast", label: "Ultrafast" }],
-		current: mode,
-		onSelect: (value: string) => { mode = value; selected.push(value); publish(); },
-	});
-	publish();
 	try {
 		const editor = hud.editorFactory()(fakeTui, {}, {});
-		const line = strip(editor.render(80)[0]!);
-		assert.match(line, /standard • gpt-5\.6-sol • medium/);
-		const x = line.indexOf("standard") + 2;
-		editor.handleMouse(mouse({ x, y: 0, width: 80 }));
-		await settle();
-		const popup = hud.popups.at(-1)!.component;
-		assert.match(strip(popup.render(50)[0]!), /Speed/);
-		popup.handleInput("\x1b[B");
-		popup.handleInput("\x1b[B");
-		popup.handleInput("\r");
-		await settle();
-		assert.deepEqual(selected, ["ultrafast"]);
-		assert.match(strip(editor.render(80)[0]!), /↯ ultrafast • gpt-5\.6-sol • medium/);
-		hud.statuses.set("fast-mode", "⚡ ultrafast");
-		assert.doesNotMatch(hud.renderFooter(120), /ultrafast/);
-		hud.statuses.set("fast-mode", "⚡ ultrafast (reported: default)");
-		assert.match(hud.renderFooter(200), /reported: default/);
-		assert.equal(strip(editor.render(80)[0]!).match(/ultrafast/g)?.length, 1);
-		for (const width of [30, 40, 60, 80]) {
-			for (const rendered of editor.render(width)) assert.ok(strip(rendered).length <= width);
+		for (const [status, prefix, footerText] of [
+			["⚡ fast", "↯ fast • ", ""],
+			["\x1b[33m⚡\x1b[0m\x1b[2m fast\x1b[0m", "↯ fast • ", ""],
+			["⚡ fast (reported: priority)", "↯ fast • ", "reported: priority"],
+			["⚡ ultrafast", "↯ ultrafast • ", ""],
+			["⚡ ultrafast (reported: default)", "↯ ultrafast • ", "reported: default"],
+			["⚡ n/a", "", "n/a"],
+			["⚡ fast n/a", "", "n/a"],
+			["⚡ ultrafast n/a", "", "n/a"],
+		]) {
+			hud.statuses.set("fast-mode", status);
+			const footer = hud.renderFooter(200);
+			assert.ok(strip(editor.render(80)[0]!).endsWith(` ${prefix}gpt-5.6-sol • medium ╮`));
+			if (footerText) assert.ok(footer.includes(footerText));
+			else assert.doesNotMatch(footer, /fast/);
 		}
+		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "fast-mode", label: "↯ ultrafast n/a" });
+		assert.doesNotMatch(hud.renderFooter(200), /n\/a/);
+		assert.match(strip(editor.render(80)[0]!), /↯ ultrafast n\/a • gpt-5\.6-sol/);
 	} finally {
 		await hud.fire("session_shutdown");
 	}
 });
 
-test("clicking the speed label cycles immediately, including an open hover preview", async () => {
+test("provider request speed is a fallback until a controller publishes a status", async () => {
 	const hud = installHud("medium");
 	await hud.fire("session_start");
-	let mode = "ultrafast";
-	let clicks = 0;
-	const publish = () => hud.bus.emit(CHROME_MENU_EVENT, {
-		protocolVersion: 1, id: "fast-mode", title: "Speed",
-		label: mode === "off" ? "standard" : `↯ ${mode}`,
-		items: [{ value: "off", label: "Standard" }, { value: "fast", label: "Fast" }, { value: "ultrafast", label: "Ultrafast" }],
-		current: mode,
-		onClick: () => { clicks++; const modes = ["off", "fast", "ultrafast"]; mode = modes[(modes.indexOf(mode) + 1) % modes.length]!; publish(); },
-		onSelect: (value: string) => { mode = value; publish(); },
-	});
-	publish();
 	try {
 		const editor = hud.editorFactory()(fakeTui, {}, {});
-		const atLabel = (type: "click" | "move") => {
-			const line = strip(editor.render(80)[0]!);
-			return mouse({ type, button: type === "move" ? "none" : "left", x: line.indexOf(mode === "off" ? "standard" : `↯ ${mode}`) + 2, y: 0, width: 80 });
-		};
-		editor.handleMouse(atLabel("click"));
-		await settle();
-		assert.equal(mode, "off");
-		assert.equal(hud.popups.length, 0);
-		editor.handleMouse(atLabel("move"));
-		editor.handleMouse(atLabel("click"));
-		await wait(HOVER_OPEN_DELAY_MS + 20);
-		assert.equal(mode, "fast");
-		assert.equal(hud.popups.length, 0, "click cancels a pending hover menu");
-		editor.handleMouse(atLabel("move"));
-		await wait(HOVER_OPEN_DELAY_MS + 20);
-		assert.equal(hud.popups.length, 1);
-		assert.equal(hud.popups[0]!.component.focused, false);
-		editor.handleMouse(atLabel("click"));
-		await settle();
-		assert.equal(mode, "ultrafast");
-		assert.equal(clicks, 3);
-		assert.equal(hud.popups[0]!.component.isClosed, true, "click cycles rather than pinning a preview");
-		editor.handleMouse(atLabel("click"));
-		await settle();
-		assert.equal(mode, "off");
-		editor.handleMouse(atLabel("move"));
-		await wait(HOVER_OPEN_DELAY_MS + 20);
-		const popup = hud.popups.at(-1)!.component;
-		popup.handleMouse(mouse({ x: 5, y: 3, width: 50, height: 5 }));
-		await settle();
-		assert.equal(mode, "ultrafast", "the hover menu still selects an explicit mode");
-		assert.equal(clicks, 4);
+		for (const [payload, prefix] of [
+			[{ service_tier: "ultrafast" }, "↯ ultrafast • "],
+			[{ service_tier: "priority" }, "↯ fast • "],
+			[{ speed: "fast" }, "↯ fast • "],
+			[{ service_tier: "default" }, ""],
+			[null, ""],
+			[[], ""],
+		]) {
+			await hud.fire("before_provider_request", { payload });
+			assert.ok(strip(editor.render(80)[0]!).endsWith(` ${prefix}gpt-5.6-sol • medium ╮`));
+		}
+		await hud.fire("before_provider_request", { payload: { service_tier: "ultrafast" } });
+		await hud.fire("model_select");
+		assert.doesNotMatch(strip(editor.render(80)[0]!), /↯/);
+		hud.statuses.set("fast-mode", "⚡ fast n/a");
+		hud.renderFooter(200);
+		await hud.fire("before_provider_request", { payload: { service_tier: "ultrafast" } });
+		assert.doesNotMatch(strip(editor.render(80)[0]!), /↯/);
+		hud.statuses.delete("fast-mode");
+		hud.renderFooter(200);
+		assert.doesNotMatch(strip(editor.render(80)[0]!), /↯/);
 	} finally {
 		await hud.fire("session_shutdown");
 	}
 });
+
+for (const modes of [["off", "fast"], ["off", "fast", "ultrafast"]]) {
+	test(`speed clicks delegate the ${modes.length}-mode cycle; hover offers only the published choices`, async () => {
+		const hud = installHud("medium");
+		await hud.fire("session_start");
+		if (modes.length === 3) await hud.selectModel(scopedAstra);
+		let mode = modes.at(-1)!;
+		let clicks = 0;
+		const publish = () => hud.bus.emit(CHROME_MENU_EVENT, {
+			protocolVersion: 1, id: "fast-mode", title: "Speed",
+			label: mode === "off" ? "standard" : `↯ ${mode}`,
+			items: modes.map((value) => ({ value, label: value === "off" ? "Standard" : value === "fast" ? "Fast" : "Ultrafast" })),
+			current: mode,
+			onClick: () => { clicks++; mode = modes[(modes.indexOf(mode) + 1) % modes.length]!; publish(); },
+			onSelect: (value: string) => { mode = value; publish(); },
+		});
+		publish();
+		try {
+			const editor = hud.editorFactory()(fakeTui, {}, {});
+			const atLabel = (type: "click" | "move") => {
+				const line = strip(editor.render(80)[0]!);
+				return mouse({ type, button: type === "move" ? "none" : "left", x: line.indexOf(mode === "off" ? "standard" : `↯ ${mode}`) + 2, y: 0, width: 80 });
+			};
+			editor.handleMouse(atLabel("click"));
+			await settle();
+			assert.equal(mode, "off");
+			assert.equal(hud.popups.length, 0);
+			editor.handleMouse(atLabel("move"));
+			editor.handleMouse(atLabel("click"));
+			await wait(HOVER_OPEN_DELAY_MS + 20);
+			assert.equal(mode, "fast");
+			assert.equal(hud.popups.length, 0, "click cancels a pending hover menu");
+			editor.handleMouse(atLabel("move"));
+			await wait(HOVER_OPEN_DELAY_MS + 20);
+			assert.equal(hud.popups.length, 1);
+			assert.equal(hud.popups[0]!.component.focused, false);
+			editor.handleMouse(atLabel("click"));
+			await settle();
+			assert.equal(mode, modes.length === 3 ? "ultrafast" : "off");
+			assert.equal(hud.popups[0]!.component.isClosed, true, "click cycles rather than pinning a preview");
+			editor.handleMouse(atLabel("move"));
+			await wait(HOVER_OPEN_DELAY_MS + 20);
+			const popup = hud.popups.at(-1)!.component;
+			assert.equal(popup.render(50).length, modes.length + 2);
+			popup.handleMouse(mouse({ x: 5, y: 2, width: 50, height: modes.length + 2 }));
+			await settle();
+			assert.equal(mode, "fast", "the hover menu still selects an explicit mode");
+			assert.equal(clicks, 3, "row selection does not invoke the direct click callback");
+			hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "info", label: "3 tabs" });
+			hud.statuses.set("fast-mode", "⚡ fast (reported: default)");
+			assert.match(hud.renderFooter(200), /reported: default/);
+			assert.ok(strip(editor.render(80)[0]!).endsWith(` ↯ fast • ${hud.createCtx().model.id} • medium • 3 tabs ╮`));
+			hud.statuses.set("fast-mode", "⚡ fast");
+			assert.doesNotMatch(hud.renderFooter(200), /fast/);
+		} finally {
+			await hud.fire("session_shutdown");
+		}
+	});
+}
 
 test("direct-click-only labels are hotspots and callback failures are reported", async () => {
 	const hud = installHud("medium");
@@ -894,6 +910,7 @@ test("a label without rows is informational only, and malformed menus are ignore
 		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 2, id: "future", label: "nope", items: [] });
 		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "", label: "nope" });
 		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "bad", label: 42 });
+		hud.bus.emit(CHROME_MENU_EVENT, { protocolVersion: 1, id: "bad-click", label: "nope", onClick: "nope" });
 		const line = strip(editor.render(60)[0]!);
 		assert.match(line, /─ gpt-5\.6-sol • medium • 3 tabs ╮$/);
 		assert.doesNotMatch(line, /nope/);
@@ -943,9 +960,6 @@ test("an extension can append rows to the built-in model popup and receives thei
 test("chrome menu payloads are validated", () => {
 	assert.equal(parseChromeMenu({ protocolVersion: 1, id: "x", extend: "footer" }), undefined);
 	assert.equal(parseChromeMenu({ protocolVersion: 1, id: "x", onSelect: "nope" }), undefined);
-	assert.equal(parseChromeMenu({ protocolVersion: 1, id: "x", onClick: "nope" }), undefined);
-	const onClick = () => {};
-	assert.deepEqual(parseChromeMenu({ protocolVersion: 1, id: "x", onClick }), { protocolVersion: 1, id: "x", onClick });
 	assert.deepEqual(parseChromeMenu({ protocolVersion: 1, id: "x", remove: true }), { protocolVersion: 1, id: "x", remove: true });
 	const parsed = parseChromeMenu({ protocolVersion: 1, id: "x", label: "L", items: [{ value: "a", label: "A" }, { value: 1, label: "bad" }, "junk"] });
 	assert.deepEqual(parsed, { protocolVersion: 1, id: "x", label: "L", items: [{ value: "a", label: "A" }] });

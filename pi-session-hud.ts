@@ -340,32 +340,7 @@ function stripAnsi(text: string): string {
 		.replace(/\x1b_[\s\S]*?(?:\x07|\x1b\\)/g, "");
 }
 
-export type SpeedMode = "off" | "fast" | "ultrafast";
-
-export function speedModeFromExtensionStatuses(statuses: ReadonlyMap<string, string>): SpeedMode | null {
-	const status = statuses.get(FAST_MODE_STATUS_KEY);
-	if (status === undefined) return null;
-	const text = stripAnsi(status).trim().toLowerCase();
-	if (/\bn\/a\b/.test(text)) return "off";
-	const match = text.match(/^⚡ (ultrafast|fast)(?:\s|$)/);
-	return match ? match[1] as SpeedMode : "off";
-}
-
-export function fastModeFromExtensionStatuses(statuses: ReadonlyMap<string, string>): boolean | null {
-	const mode = speedModeFromExtensionStatuses(statuses);
-	return mode === null ? null : mode !== "off";
-}
-
-export function requestSpeedMode(payload: unknown): SpeedMode {
-	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return "off";
-	const request = payload as Record<string, unknown>;
-	if (request.service_tier === "ultrafast") return "ultrafast";
-	return request.service_tier === "priority" || request.speed === "fast" ? "fast" : "off";
-}
-
-export function requestUsesFastMode(payload: unknown): boolean {
-	return requestSpeedMode(payload) !== "off";
-}
+type SpeedMode = "off" | "fast" | "ultrafast";
 
 export interface LabelModel {
 	id: string;
@@ -385,7 +360,7 @@ export function menuIdFromTarget(target: ChromeTarget): string | undefined {
 export function modelLabelSegments(
 	model: LabelModel,
 	thinking: string,
-	fastModeActive: boolean | SpeedMode,
+	speedMode: SpeedMode,
 	menus: readonly MenuLabel[] = [],
 ): LabelSegment[] {
 	const segments: LabelSegment[] = [];
@@ -393,9 +368,9 @@ export function modelLabelSegments(
 	// The controlling extension supplies the choices; the HUD never owns the speed setting.
 	if (speedMenu) {
 		segments.push({ text: speedMenu.label, ...(speedMenu.clickable ? { target: menuTarget(speedMenu.id) } : {}) }, { text: " • " });
-	} else if (fastModeActive && fastModeActive !== "off") {
+	} else if (speedMode !== "off") {
 		// Use a single-column text glyph so the TUI and terminal agree on border width.
-		segments.push({ text: `↯ ${fastModeActive === "ultrafast" ? "ultrafast" : "fast"} • ` });
+		segments.push({ text: `↯ ${speedMode} • ` });
 	}
 	segments.push({ text: model.id, target: "model" });
 	// Match Pi's footer: only reasoning models get a thinking segment, and "off" stays
@@ -406,10 +381,6 @@ export function modelLabelSegments(
 		segments.push({ text: " • " }, { text: menu.label, ...(menu.clickable ? { target: menuTarget(menu.id) } : {}) });
 	}
 	return segments;
-}
-
-export function formatModelLabel(model: LabelModel, thinking: string, fastModeActive: boolean | SpeedMode, menus: readonly MenuLabel[] = []): string {
-	return modelLabelSegments(model, thinking, fastModeActive, menus).map((segment) => segment.text).join("");
 }
 
 /**
@@ -1071,8 +1042,8 @@ export default function (pi: ExtensionAPI) {
 	let sessionGeneration = 0;
 	let autoCompactPolicy: AutoCompactPolicySnapshot | null = null;
 	let compactionSettings: CompactionSettingsReader | null = null;
-	let lastRequestUsedFastMode: SpeedMode = "off";
-	let extensionFastModeActive: SpeedMode | null = null;
+	let lastRequestSpeedMode: SpeedMode = "off";
+	let extensionSpeedMode: SpeedMode | null = null;
 
 	function selectedModelIdentity(ctx: ExtensionContext | null): ModelIdentity | undefined {
 		const model = ctx?.model;
@@ -1108,7 +1079,7 @@ export default function (pi: ExtensionAPI) {
 	function chromeMenuLabels(): MenuLabel[] {
 		const labels: MenuLabel[] = [];
 		for (const menu of chromeMenus.values()) {
-			if (menu.label) labels.push({ id: menu.id, label: menu.label, clickable: typeof menu.onClick === "function" || typeof menu.items === "function" || (menu.items?.length ?? 0) > 0 });
+			if (menu.label) labels.push({ id: menu.id, label: menu.label, clickable: menu.onClick !== undefined || typeof menu.items === "function" || (menu.items?.length ?? 0) > 0 });
 		}
 		return labels;
 	}
@@ -1240,34 +1211,26 @@ export default function (pi: ExtensionAPI) {
 	function currentModelLabelSegments(): LabelSegment[] {
 		const model = currentCtx?.model;
 		if (!model) return [];
-		const fastModeActive = extensionFastModeActive ?? lastRequestUsedFastMode;
-		return modelLabelSegments(model, pi.getThinkingLevel(), fastModeActive, chromeMenuLabels());
+		return modelLabelSegments(model, pi.getThinkingLevel(), extensionSpeedMode ?? lastRequestSpeedMode, chromeMenuLabels());
 	}
 
 	function syncExtensionStatuses(footerData: ReadonlyFooterDataProvider): string[] {
 		const statuses = footerData.getExtensionStatuses();
-		const observedFastMode = speedModeFromExtensionStatuses(statuses);
-		const previousFastMode = extensionFastModeActive;
-		if (observedFastMode !== null) extensionFastModeActive = observedFastMode;
-		else if (extensionFastModeActive !== null) extensionFastModeActive = "off";
-		if (extensionFastModeActive !== previousFastMode) editorTui?.requestRender();
+		const status = statuses.get(FAST_MODE_STATUS_KEY);
+		const text = status === undefined ? "" : stripAnsi(status).trim().toLowerCase();
+		const mode = text.match(/^⚡ (ultrafast|fast)(?:\s|$)/)?.[1];
+		const observedSpeedMode: SpeedMode = !/\bn\/a\b/.test(text) && (mode === "fast" || mode === "ultrafast") ? mode : "off";
+		const previousSpeedMode = extensionSpeedMode;
+		// Once a controller has published a status, removing it means off, not stale request fallback.
+		if (status !== undefined || extensionSpeedMode !== null) extensionSpeedMode = observedSpeedMode;
+		if (extensionSpeedMode !== previousSpeedMode) editorTui?.requestRender();
 
+		// Keep backend diagnostics; only dedupe n/a when the controlling menu shows it.
+		const hideSpeedStatus = /^⚡ (?:fast|ultrafast)$/.test(text)
+			|| (Boolean(chromeMenus.get(FAST_MODE_STATUS_KEY)?.label) && /^⚡ (?:fast|ultrafast) n\/a$/.test(text));
 		return [...statuses.entries()]
-			.filter(([key, value]) => {
-				if (!value) return false;
-				if (key !== FAST_MODE_STATUS_KEY) return true;
-				const text = stripAnsi(value).trim().toLowerCase();
-				if (/^⚡ (?:fast|ultrafast)$/.test(text)) return false;
-				// Keep backend diagnostics; only dedupe n/a when the controlling menu shows it.
-				return !chromeMenus.get(FAST_MODE_STATUS_KEY)?.label || !/^⚡ (?:fast|ultrafast) n\/a$/.test(text);
-			})
+			.filter(([key, value]) => value && (key !== FAST_MODE_STATUS_KEY || !hideSpeedStatus))
 			.map(([, value]) => normalizeText(value));
-	}
-
-	function updateFastModeObservation(next: SpeedMode) {
-		if (next === lastRequestUsedFastMode) return;
-		lastRequestUsedFastMode = next;
-		if (!disposed) editorTui?.requestRender();
 	}
 
 	function currentSubscriptionUsage(): SubscriptionUsage | null {
@@ -1372,8 +1335,8 @@ export default function (pi: ExtensionAPI) {
 		sessionGeneration++;
 		currentCtx = ctx;
 		firstUserText = null;
-		lastRequestUsedFastMode = "off";
-		extensionFastModeActive = null;
+		lastRequestSpeedMode = "off";
+		extensionSpeedMode = null;
 		compactionSettings = readCompactionSettings(ctx.cwd, ctx.isProjectTrusted());
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
@@ -1643,7 +1606,7 @@ export default function (pi: ExtensionAPI) {
 						if (onClick) {
 							cancelHoverLeave();
 							activePopup?.close();
-							Promise.resolve().then(() => onClick()).catch((err: unknown) => {
+							Promise.resolve().then(onClick).catch((err: unknown) => {
 								if (!isStaleExtensionError(err)) currentCtx?.ui.notify(err instanceof Error ? err.message : String(err), "error");
 							});
 							return { handled: true };
@@ -1770,7 +1733,16 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_start", async (_event, ctx) => { refreshAndRender(ctx); });
 	pi.on("before_provider_request", (event, ctx) => {
 		currentCtx = ctx;
-		updateFastModeObservation(requestSpeedMode(event.payload));
+		const payload = event.payload;
+		let speedMode: SpeedMode = "off";
+		if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
+			const serviceTier = "service_tier" in payload ? payload.service_tier : undefined;
+			if (serviceTier === "ultrafast") speedMode = "ultrafast";
+			else if (serviceTier === "priority" || ("speed" in payload && payload.speed === "fast")) speedMode = "fast";
+		}
+		if (speedMode === lastRequestSpeedMode) return;
+		lastRequestSpeedMode = speedMode;
+		if (!disposed) editorTui?.requestRender();
 	});
 	pi.on("agent_end", async (_event, ctx) => {
 		refreshAndRender(ctx);
@@ -1788,7 +1760,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("thinking_level_select", async () => { requestChromeRender(); });
 	pi.on("model_select", async (_event, ctx) => {
 		currentCtx = ctx;
-		lastRequestUsedFastMode = "off";
+		lastRequestSpeedMode = "off";
 		refreshContext(ctx);
 		requestAutoCompactPolicy(ctx);
 		if (latestSubscriptionUsage?.provider !== ctx.model?.provider) latestSubscriptionUsage = null;

@@ -83,7 +83,7 @@ export function parseChromeMenu(value: unknown): ChromeMenu | ChromeMenuRemoval 
 		...(items !== undefined ? { items: Array.isArray(items) ? parseChromeMenuItems(items) : (items as () => ChromeMenuItem[]) } : {}),
 		...(current !== undefined ? { current: current as string | (() => string | undefined) } : {}),
 		...(extend !== undefined ? { extend } : {}),
-		...(onClick !== undefined ? { onClick: onClick as ChromeMenu["onClick"] } : {}),
+		...(onClick !== undefined ? { onClick: async () => { await onClick(); } } : {}),
 		...(onSelect !== undefined ? { onSelect: onSelect as ChromeMenu["onSelect"] } : {}),
 	};
 }
