@@ -816,7 +816,7 @@ test("speed menu is promoted before the model without duplicate status, and sele
 	}
 });
 
-test("clicking the speed label toggles immediately, including an open hover preview", async () => {
+test("clicking the speed label cycles immediately, including an open hover preview", async () => {
 	const hud = installHud("medium");
 	await hud.fire("session_start");
 	let mode = "ultrafast";
@@ -826,7 +826,7 @@ test("clicking the speed label toggles immediately, including an open hover prev
 		label: mode === "off" ? "standard" : `↯ ${mode}`,
 		items: [{ value: "off", label: "Standard" }, { value: "fast", label: "Fast" }, { value: "ultrafast", label: "Ultrafast" }],
 		current: mode,
-		onClick: () => { clicks++; mode = mode === "off" ? "fast" : "off"; publish(); },
+		onClick: () => { clicks++; const modes = ["off", "fast", "ultrafast"]; mode = modes[(modes.indexOf(mode) + 1) % modes.length]!; publish(); },
 		onSelect: (value: string) => { mode = value; publish(); },
 	});
 	publish();
@@ -851,16 +851,19 @@ test("clicking the speed label toggles immediately, including an open hover prev
 		assert.equal(hud.popups[0]!.component.focused, false);
 		editor.handleMouse(atLabel("click"));
 		await settle();
-		assert.equal(mode, "off");
+		assert.equal(mode, "ultrafast");
 		assert.equal(clicks, 3);
-		assert.equal(hud.popups[0]!.component.isClosed, true, "click toggles rather than pinning a preview");
+		assert.equal(hud.popups[0]!.component.isClosed, true, "click cycles rather than pinning a preview");
+		editor.handleMouse(atLabel("click"));
+		await settle();
+		assert.equal(mode, "off");
 		editor.handleMouse(atLabel("move"));
 		await wait(HOVER_OPEN_DELAY_MS + 20);
 		const popup = hud.popups.at(-1)!.component;
 		popup.handleMouse(mouse({ x: 5, y: 3, width: 50, height: 5 }));
 		await settle();
 		assert.equal(mode, "ultrafast", "the hover menu still selects an explicit mode");
-		assert.equal(clicks, 3);
+		assert.equal(clicks, 4);
 	} finally {
 		await hud.fire("session_shutdown");
 	}

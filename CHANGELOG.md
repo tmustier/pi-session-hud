@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Clicking the speed label now toggles acceleration on or off instead of opening or pinning its popup. Hover still opens the mode choices. Other labels keep their existing click-to-open behaviour.
+- Clicking the speed label now cycles the model's supported modes instead of opening or pinning its popup: Standard → Fast → Ultrafast → Standard on Astra, or Standard → Fast → Standard elsewhere. Hover still opens the mode choices. Other labels keep their existing click-to-open behaviour.
 - Keep reported-backend diagnostics visible in the footer rather than losing them when the speed label is promoted to the editor border.
 
 ## [0.7.0] - 2026-09-22
