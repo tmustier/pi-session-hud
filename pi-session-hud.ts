@@ -116,8 +116,6 @@ export type ChromeLayout = {
 	lineCount: number;
 	hotspots: ChromeHotspot[];
 };
-/** Pi's live theme. Every HUD colour comes from it, so the HUD follows Pi's system theme and light/dark switches. */
-type HudTheme = Pick<Theme, "fg" | "style" | "colors">;
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 type InstalledEditor = {
 	factory: EditorFactory;
@@ -179,42 +177,6 @@ export function contextBand(percent: number | null, tokens: number | null, conte
 	if (value >= levels.amber) return "amber";
 	if (value >= levels.yellow) return "yellow";
 	return "healthy";
-}
-
-/** Keyed by the theme's resolved colours, which Pi replaces when the theme or terminal colours change. */
-const yellowBandColors = new WeakMap<object, Color | null>();
-
-/**
- * The yellow band sits halfway between `success` and `warning`; the theme has no token for it.
- * Palette indices are drawn by the terminal itself, so a blend would replace them with a guess:
- * use `warning` instead.
- */
-export function yellowBandColor(theme: HudTheme): Color | null {
-	const colors = theme.colors;
-	let color = yellowBandColors.get(colors);
-	if (color === undefined) {
-		const { success, warning } = colors;
-		color = success.kind === "indexed" || warning.kind === "indexed" ? null : mixColors(success, warning, 0.5);
-		yellowBandColors.set(colors, color);
-	}
-	return color;
-}
-
-export function paintContext(band: ContextBand, text: string, theme: HudTheme): string {
-	if (band === "healthy") return theme.fg("success", text);
-	if (band === "amber") return theme.fg("warning", text);
-	if (band === "red") return theme.fg("error", text);
-	const yellow = yellowBandColor(theme);
-	return yellow ? theme.style(text, { fg: yellow }) : theme.fg("warning", text);
-}
-
-function contextBar(percent: number | null, band: ContextBand, theme: HudTheme): string {
-	if (percent === null) return theme.fg("dim", "░".repeat(CONTEXT_BAR_WIDTH));
-
-	const clampedPercent = clamp(percent, 0, 100);
-	const filled = clamp(Math.round((clampedPercent / 100) * CONTEXT_BAR_WIDTH), 0, CONTEXT_BAR_WIDTH);
-	const empty = CONTEXT_BAR_WIDTH - filled;
-	return `${paintContext(band, "█".repeat(filled), theme)}${theme.fg("dim", "░".repeat(empty))}`;
 }
 
 function displayPath(cwd: string): string {
@@ -727,18 +689,6 @@ function parseGitShortstat(stdout: string): { added: number; removed: number } {
 	return { added, removed };
 }
 
-function formatDiffStats(added: number, removed: number, dirty: boolean, theme: HudTheme): string {
-	const parts: string[] = [];
-	if (added > 0) parts.push(theme.fg("toolDiffAdded", `+${added}`));
-	if (removed > 0) parts.push(theme.fg("toolDiffRemoved", `-${removed}`));
-	if (parts.length > 0) return ` ${parts.join(" ")}`;
-	return dirty ? ` ${theme.fg("dim", "~")}` : "";
-}
-
-function muted(text: string, theme: HudTheme): string {
-	return theme.fg("muted", text);
-}
-
 function numberFrom(value: unknown): number | undefined {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
 	if (typeof value === "string" && value.trim()) {
@@ -879,29 +829,6 @@ export function usagePopupLines(usage: SubscriptionUsage, now: number, theme: Us
 		if (row.reset) line += ` ${theme.fg("muted", `| ${row.reset}`)}`;
 		return line;
 	});
-}
-
-function formatUsageMetric(usage: SubscriptionUsage, theme: HudTheme): string {
-	const percentLeft = Math.round(clamp(100 - usage.usedPercent, 0, 100));
-	return muted(`${percentLeft}% left`, theme);
-}
-
-function formatProviderDetail(provider: string, usage: SubscriptionUsage | null, theme: HudTheme): string {
-	if (!provider) return "";
-	if (usage?.resetAtMs) {
-		return muted(`${provider} weekly reset in ${formatResetCountdown(usage.resetAtMs)}  `, theme);
-	}
-	return muted(provider, theme);
-}
-
-function formatProviderDetailCompact(usage: SubscriptionUsage | null, theme: HudTheme): string {
-	return usage?.resetAtMs ? muted(`${formatResetCountdown(usage.resetAtMs)}  `, theme) : "";
-}
-
-function formatSessionCost(cost: number, theme: HudTheme): string {
-	const amount = Math.max(0, cost);
-	const digits = amount < 1 ? 3 : 2;
-	return muted(`$${amount.toFixed(digits)}`, theme);
 }
 
 function sessionCost(ctx: ExtensionContext | null): number {
@@ -1248,22 +1175,23 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** Bottom-right label: subscription quota (clickable, it has a popup) or session cost on API-key billing. */
-	function inputUsageSegments(theme: HudTheme): LabelSegment[] {
+	function inputUsageSegments(theme: Theme): LabelSegment[] {
 		const subscriptionUsage = currentSubscriptionUsage();
-		if (subscriptionUsage) return [{ text: formatUsageMetric(subscriptionUsage, theme), target: "usage" }];
-		if (!isUsingSubscriptionAuth(currentCtx)) return [{ text: formatSessionCost(sessionCost(currentCtx), theme) }];
-		return [];
+		if (subscriptionUsage) return [{ text: theme.fg("muted", `${Math.round(100 - subscriptionUsage.usedPercent)}% left`), target: "usage" }];
+		if (isUsingSubscriptionAuth(currentCtx)) return [];
+		const cost = sessionCost(currentCtx);
+		return [{ text: theme.fg("muted", `$${cost.toFixed(cost < 1 ? 3 : 2)}`) }];
 	}
 
-	function joinFooterDetails(parts: string[], theme: HudTheme): string {
-		return parts.filter(Boolean).join(` ${muted("•", theme)} `);
+	function joinFooterDetails(parts: string[], theme: Theme): string {
+		return parts.filter(Boolean).join(` ${theme.fg("muted", "•")} `);
 	}
 
 	/**
 	 * Right side of the footer: the HUD's own provider detail, preceded by the extension statuses
 	 * that fit beside it, in order. Statuses are ancillary and must not push the detail out.
 	 */
-	function footerRight(statuses: string[], detail: string, left: string, width: number, theme: HudTheme): string {
+	function footerRight(statuses: string[], detail: string, left: string, width: number, theme: Theme): string {
 		const room = width - visibleWidth(left) - 1;
 		const kept: string[] = [];
 		for (const status of statuses) {
@@ -1280,7 +1208,7 @@ export default function (pi: ExtensionAPI) {
 	function renderFooter(
 		width: number,
 		footerData: ReadonlyFooterDataProvider,
-		theme: HudTheme,
+		theme: Theme,
 	): string[] {
 		if (disposed) return [""];
 		try {
@@ -1288,34 +1216,50 @@ export default function (pi: ExtensionAPI) {
 			const extensionStatuses = syncExtensionStatuses(footerData);
 
 			const band = contextBand(contextPercent, contextTokens, providerContextWindow);
+			const { success, warning } = theme.colors;
+			// The theme has no token between success and warning. Palette indices are drawn by the
+			// terminal itself, and a blend would replace them with a guess.
+			const bandColors: Record<ContextBand, ThemeColor | Color> = {
+				healthy: "success",
+				yellow: success.kind === "indexed" || warning.kind === "indexed" ? "warning" : mixColors(success, warning, 0.5),
+				amber: "warning",
+				red: "error",
+			};
+			const paint = (text: string) => theme.style(text, { fg: bandColors[band] });
+			const filled = contextPercent === null ? 0 : Math.round((clamp(contextPercent, 0, 100) / 100) * CONTEXT_BAR_WIDTH);
+			const bar = `${paint("█".repeat(filled))}${theme.fg("dim", "░".repeat(CONTEXT_BAR_WIDTH - filled))}`;
 			const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
 			const tokUsed = contextTokens === null ? "?" : fmtTokens(contextTokens);
-			const capIndicator = isContextWindowCapped(providerContextWindow, contextWindow) ? muted("↓", theme) : "";
-			const bar = contextBar(contextPercent, band, theme);
-			const contextFull = `${bar} ${paintContext(band, `${pct} ${tokUsed}/${fmtTokens(contextWindow)}`, theme)}${capIndicator}`;
-			const contextCompact = `${bar} ${paintContext(band, `${pct} ${tokUsed}`, theme)}`;
+			const capIndicator = isContextWindowCapped(providerContextWindow, contextWindow) ? theme.fg("muted", "↓") : "";
+			const contextFull = `${bar} ${paint(`${pct} ${tokUsed}/${fmtTokens(contextWindow)}`)}${capIndicator}`;
+			const contextCompact = `${bar} ${paint(`${pct} ${tokUsed}`)}`;
 
 			const cwd = currentCtx?.cwd ?? process.cwd();
 			const branch = footerData.getGitBranch();
-			const diffStats = formatDiffStats(gitAdded, gitRemoved, gitDirty, theme);
+			const diffCounts: string[] = [];
+			if (gitAdded > 0) diffCounts.push(theme.fg("toolDiffAdded", `+${gitAdded}`));
+			if (gitRemoved > 0) diffCounts.push(theme.fg("toolDiffRemoved", `-${gitRemoved}`));
+			const diffStats = diffCounts.length > 0 ? ` ${diffCounts.join(" ")}` : gitDirty ? ` ${theme.fg("dim", "~")}` : "";
 			const location = `${displayPath(cwd)}${branch ? ` (${branch})` : ""}${diffStats}`;
 			const locationCompact = branch ? `(${branch})${diffStats}` : (diffStats.trim() || displayPath(cwd));
 			const sessionName = normalizeText(pi.getSessionName() ?? "");
 			const isFallbackSessionLabel = !sessionName && Boolean(firstUserText);
 			const sessionLabelRaw = sessionName || (firstUserText ? firstWords(firstUserText) : "");
 			const sessionLabel = sessionLabelRaw
-				? isFallbackSessionLabel ? muted(sessionLabelRaw, theme) : theme.fg("text", sessionLabelRaw)
+				? theme.fg(isFallbackSessionLabel ? "muted" : "text", sessionLabelRaw)
 				: "";
-			const divider = muted("│", theme);
-			const sessionDivider = muted("|", theme);
+			const divider = theme.fg("muted", "│");
+			const sessionDivider = theme.fg("muted", "|");
 			const gutter = " ".repeat(FOOTER_GUTTER_WIDTH);
 			const fullLeftBase = `${gutter}${contextFull} ${divider} ${location}`;
 			const compactLeftBase = `${gutter}${contextCompact} ${divider} ${location}`;
 			const fullLeft = sessionLabel ? `${fullLeftBase} ${sessionDivider} ${sessionLabel}` : fullLeftBase;
 			const compactLeft = sessionLabel ? `${compactLeftBase} ${sessionDivider} ${sessionLabel}` : compactLeftBase;
 			const subscriptionUsage = currentSubscriptionUsage();
-			const detailFull = formatProviderDetail(currentCtx?.model?.provider ?? "", subscriptionUsage, theme);
-			const detailCompact = formatProviderDetailCompact(subscriptionUsage, theme);
+			const provider = currentCtx?.model?.provider ?? "";
+			const resetIn = subscriptionUsage?.resetAtMs ? formatResetCountdown(subscriptionUsage.resetAtMs) : "";
+			const detailFull = provider ? theme.fg("muted", resetIn ? `${provider} weekly reset in ${resetIn}  ` : provider) : "";
+			const detailCompact = resetIn ? theme.fg("muted", `${resetIn}  `) : "";
 			const line = (left: string, detail: string) =>
 				fitLeftRight(left, footerRight(extensionStatuses, detail, left, width, theme), width);
 

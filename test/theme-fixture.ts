@@ -1,4 +1,4 @@
-import { Theme, type ThemeBg, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import { Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 
 type Value = string | number;
 type Roles = { text: Value; muted: Value; dim: Value; accent: Value; success: Value; warning: Value; error: Value };
@@ -17,14 +17,11 @@ const FOREGROUND_ROLES = {
 	thinkingMax: "accent", bashMode: "warning",
 } satisfies Record<ThemeColor, keyof Roles>;
 
-const BACKGROUNDS: ThemeBg[] = [
-	"selectedBg", "searchMatchBg", "userMessageBg", "customMessageBg", "toolPendingBg", "toolSuccessBg", "toolErrorBg",
-];
-
 function buildTheme(name: string, roles: Roles, background: Value, mode: "256color" | "truecolor", dim: ThemeColor[] = []): Theme {
-	const fg = Object.fromEntries(Object.entries(FOREGROUND_ROLES).map(([token, role]) => [token, roles[role]]));
-	const bg = Object.fromEntries(BACKGROUNDS.map((token) => [token, background]));
-	return new Theme(fg as ConstructorParameters<typeof Theme>[0], bg as ConstructorParameters<typeof Theme>[1], mode, { name, dim });
+	// FOREGROUND_ROLES covers every ThemeColor, which Object.fromEntries cannot express.
+	const fg = Object.fromEntries(Object.entries(FOREGROUND_ROLES).map(([token, role]) => [token, roles[role]])) as Record<ThemeColor, Value>;
+	const bg = { selectedBg: background, userMessageBg: background, customMessageBg: background, toolPendingBg: background, toolSuccessBg: background, toolErrorBg: background };
+	return new Theme(fg, bg, mode, { name, dim });
 }
 
 /** Like Pi's system theme when the terminal reports no colours: palette indices the terminal draws itself. */
