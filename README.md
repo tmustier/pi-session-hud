@@ -11,7 +11,7 @@
  ██░░░░ 36% 98k/272k │ ~/projects/pi-session-hud (main) +12 -3 | Simplify HUD…     openai-codex weekly reset in 3d04h
 ```
 
-Only the context bar/text, git diff stats, session label, and usage metric use colour, so the line stays scannable. The stock footer's separate cwd row, activity status, extension status row, and background fill are gone.
+Only the context bar/text, git diff stats, session label, and usage metric use colour, so the line stays scannable. Every colour comes from Pi's active theme, so with Pi's default `system` theme the HUD matches your terminal palette and follows its light/dark switches. The stock footer's separate cwd row, activity status, extension status row, and background fill are gone.
 
 ## What it shows
 
@@ -38,6 +38,8 @@ The editor border:
 - one-column input gutter with word wrapping inside a full rounded border; scroll indicators (`↑ 3 more`) stay visible in the border
 
 ## Install
+
+Requires Pi 0.99.0 or newer, which added the theme colours the HUD uses.
 
 Install from npm:
 
@@ -80,13 +82,13 @@ The HUD installs itself on session start and survives `/reload`, `/resume`, and 
 
 How to read the numbers:
 
-- context colours run green → yellow-green → amber → red; thresholds are calibrated to a GPT-5.5-sized (272k) window and applied as absolute token counts on larger windows, so 1M-token models start warning at the same real usage instead of staying green too long
+- context colours use the theme's success colour, then a blend of success and warning, then warning, then error (green → yellow-green → amber → red in most palettes). When the terminal reports no colours, Pi's palette indices are used as-is and the second band uses warning. Thresholds are calibrated to a GPT-5.5-sized (272k) window and applied as absolute token counts on larger windows, so 1M-token models start warning at the same real usage instead of staying green too long
 - the displayed window is where the session actually runs out. Pi compacts when `contextTokens > contextWindow - compaction.reserveTokens`, so the HUD reads `compaction` from Pi's settings, including `modelOverrides` for the active model and any project settings, and shows that trigger point. A 1M-token model with a 750k reserve reads `98k/250k↓`, with the percentage recalculated against 250k
 - with [`pi-auto-compact`](https://github.com/tmustier/pi-auto-compact) v0.1.2 or newer loaded, its configured threshold is resolved too, and whichever limit binds first is displayed
 - context colours keep their established fixed token thresholds even when the displayed window is capped; the cap changes the denominator and percentage, not the colour band
 - the HUD keeps Pi's provider context window when no limit binds below it: auto-compaction disabled, no auto-compact policy, or a reserve and threshold that leave the full window usable
 - `?` in the context slot means Pi has no fresh usage data yet, for example right after compaction
-- named sessions render white; the unnamed fallback (first words of your first message) renders muted grey
+- named sessions use the theme's text colour; the unnamed fallback (first words of your first message) is muted
 - `↯ fast` and `↯ ultrafast` distinguish the selected processing modes. The HUD reads the `fast-mode` extension status immediately, including statuses with reported-backend metadata, and passively observes `service_tier: "priority"`, `service_tier: "ultrafast"` or `speed: "fast"` as a fallback. A status marked `n/a` is not shown as accelerated
 - with Vibes' owned fast-mode extension loaded, clicking the speed label (`standard`, `↯ fast` or `↯ ultrafast`) cycles Standard → Fast → Ultrafast → Standard on Astra, or Standard → Fast → Standard on other supported models. Hover the label to open the Speed popup and click a row to choose Standard, Fast or Ultrafast; the controlling extension supplies only the modes supported by the current model. Astra offers all three; other supported OpenAI models offer Standard and Fast. The choice updates `/fast` and its saved setting immediately
 - the HUD does not send speed patches or maintain a second speed setting. Without a controlling extension's Chrome menu, the indicator is read-only; older fast-mode extensions continue to work

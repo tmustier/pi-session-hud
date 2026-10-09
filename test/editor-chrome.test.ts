@@ -21,6 +21,7 @@ import sessionHud, {
 	thinkingPopupItems,
 	translateChromeMouseEvent,
 } from "../pi-session-hud.js";
+import { ansiFallbackTheme } from "./theme-fixture.js";
 
 // The HUD resolves Pi's compaction reserve from the agent dir, so the suite gets its own.
 const agentDir = mkdtempSync(join(tmpdir(), "pi-session-hud-agent-"));
@@ -202,6 +203,7 @@ function installHud(
 	let model: FakeModel = { id: "gpt-5.6-sol", provider: "openai-codex", api: "openai-codex-responses", contextWindow: 272_000, reasoning: options.reasoning ?? true };
 	const claims = { "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" } };
 	const token = `hdr.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
+	const footerTheme = ansiFallbackTheme();
 	// Pi creates a fresh ExtensionContext object for every event it emits.
 	const createCtx = () => ({
 		hasUI: true,
@@ -247,7 +249,7 @@ function installHud(
 		model = next;
 		await fire("model_select");
 	};
-	const renderFooter = (width: number) => footerFactory!(fakeTui, {}, footerData).render(width).map((line) => strip(line).replace(/ +/g, " ").trim()).join("\n");
+	const renderFooter = (width: number) => footerFactory!(fakeTui, footerTheme, footerData).render(width).map((line) => strip(line).replace(/ +/g, " ").trim()).join("\n");
 	return { fire, selectModel, createCtx, handlers, editorFactory: () => editorFactory!, fakeEditor, actions, forwarded, popups, changes, notices, bus, emitted, statuses, renderFooter };
 }
 
