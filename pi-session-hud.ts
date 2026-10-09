@@ -8,10 +8,13 @@ import {
 	type ExtensionContext,
 	type ReadonlyFooterDataProvider,
 	type ScopedModel,
+	type Theme,
 	type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import {
+	type Color,
 	type Component,
+	mixColors,
 	type SelectItem,
 	SelectList,
 	type SelectListTheme,
@@ -91,15 +94,6 @@ const THINKING_LEVEL_DESCRIPTIONS: Record<string, string> = {
 };
 
 const RESET = "\x1b[0m";
-const FG_DIM = "\x1b[38;2;90;90;90m";
-const FG_MUTED = "\x1b[38;2;128;128;128m";
-const FG_TEXT = "\x1b[38;2;255;255;255m";
-const DIFF_GREEN = "\x1b[38;2;100;200;120m";
-const DIFF_RED = "\x1b[38;2;240;100;100m";
-const CONTEXT_GREEN = "\x1b[38;2;100;200;120m";
-const CONTEXT_YELLOW_GREEN = "\x1b[38;2;180;210;100m";
-const CONTEXT_AMBER = "\x1b[38;2;220;180;60m";
-const CONTEXT_RED = "\x1b[38;2;240;80;80m";
 
 const CONTEXT_COLOR_REFERENCE_WINDOW = 272_000;
 const CONTEXT_WARNING_LEVELS = {
@@ -122,9 +116,8 @@ export type ChromeLayout = {
 	lineCount: number;
 	hotspots: ChromeHotspot[];
 };
-type HudTheme = {
-	fg?: (color: ThemeColor, text: string) => string;
-};
+/** Pi's live theme. Every HUD colour comes from it, so the HUD follows Pi's system theme and light/dark switches. */
+type HudTheme = Pick<Theme, "fg" | "style" | "colors">;
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 type InstalledEditor = {
 	factory: EditorFactory;
@@ -188,20 +181,40 @@ export function contextBand(percent: number | null, tokens: number | null, conte
 	return "healthy";
 }
 
-function contextColor(band: ContextBand): string {
-	if (band === "yellow") return CONTEXT_YELLOW_GREEN;
-	if (band === "amber") return CONTEXT_AMBER;
-	if (band === "red") return CONTEXT_RED;
-	return CONTEXT_GREEN;
+/** Keyed by the theme's resolved colours, which Pi replaces when the theme or terminal colours change. */
+const yellowBandColors = new WeakMap<object, Color | null>();
+
+/**
+ * The yellow band sits halfway between `success` and `warning`; the theme has no token for it.
+ * Palette indices are drawn by the terminal itself, so a blend would replace them with a guess:
+ * use `warning` instead.
+ */
+export function yellowBandColor(theme: HudTheme): Color | null {
+	const colors = theme.colors;
+	let color = yellowBandColors.get(colors);
+	if (color === undefined) {
+		const { success, warning } = colors;
+		color = success.kind === "indexed" || warning.kind === "indexed" ? null : mixColors(success, warning, 0.5);
+		yellowBandColors.set(colors, color);
+	}
+	return color;
 }
 
-function contextBar(percent: number | null, band: ContextBand): string {
-	if (percent === null) return `${FG_DIM}${"░".repeat(CONTEXT_BAR_WIDTH)}${RESET}`;
+export function paintContext(band: ContextBand, text: string, theme: HudTheme): string {
+	if (band === "healthy") return theme.fg("success", text);
+	if (band === "amber") return theme.fg("warning", text);
+	if (band === "red") return theme.fg("error", text);
+	const yellow = yellowBandColor(theme);
+	return yellow ? theme.style(text, { fg: yellow }) : theme.fg("warning", text);
+}
+
+function contextBar(percent: number | null, band: ContextBand, theme: HudTheme): string {
+	if (percent === null) return theme.fg("dim", "░".repeat(CONTEXT_BAR_WIDTH));
 
 	const clampedPercent = clamp(percent, 0, 100);
 	const filled = clamp(Math.round((clampedPercent / 100) * CONTEXT_BAR_WIDTH), 0, CONTEXT_BAR_WIDTH);
 	const empty = CONTEXT_BAR_WIDTH - filled;
-	return `${contextColor(band)}${"█".repeat(filled)}${FG_DIM}${"░".repeat(empty)}${RESET}`;
+	return `${paintContext(band, "█".repeat(filled), theme)}${theme.fg("dim", "░".repeat(empty))}`;
 }
 
 function displayPath(cwd: string): string {
@@ -714,20 +727,16 @@ function parseGitShortstat(stdout: string): { added: number; removed: number } {
 	return { added, removed };
 }
 
-function formatDiffStats(added: number, removed: number, dirty: boolean): string {
+function formatDiffStats(added: number, removed: number, dirty: boolean, theme: HudTheme): string {
 	const parts: string[] = [];
-	if (added > 0) parts.push(`${DIFF_GREEN}+${added}${RESET}`);
-	if (removed > 0) parts.push(`${DIFF_RED}-${removed}${RESET}`);
+	if (added > 0) parts.push(theme.fg("toolDiffAdded", `+${added}`));
+	if (removed > 0) parts.push(theme.fg("toolDiffRemoved", `-${removed}`));
 	if (parts.length > 0) return ` ${parts.join(" ")}`;
-	return dirty ? ` ${FG_DIM}~${RESET}` : "";
+	return dirty ? ` ${theme.fg("dim", "~")}` : "";
 }
 
-function muted(text: string, theme?: HudTheme): string {
-	return theme?.fg ? theme.fg("muted", text) : `${FG_MUTED}${text}${RESET}`;
-}
-
-function textColor(text: string, theme?: HudTheme): string {
-	return theme?.fg ? theme.fg("text", text) : `${FG_TEXT}${text}${RESET}`;
+function muted(text: string, theme: HudTheme): string {
+	return theme.fg("muted", text);
 }
 
 function numberFrom(value: unknown): number | undefined {
@@ -872,12 +881,12 @@ export function usagePopupLines(usage: SubscriptionUsage, now: number, theme: Us
 	});
 }
 
-function formatUsageMetric(usage: SubscriptionUsage, theme?: HudTheme): string {
+function formatUsageMetric(usage: SubscriptionUsage, theme: HudTheme): string {
 	const percentLeft = Math.round(clamp(100 - usage.usedPercent, 0, 100));
 	return muted(`${percentLeft}% left`, theme);
 }
 
-function formatProviderDetail(provider: string, usage: SubscriptionUsage | null, theme?: HudTheme): string {
+function formatProviderDetail(provider: string, usage: SubscriptionUsage | null, theme: HudTheme): string {
 	if (!provider) return "";
 	if (usage?.resetAtMs) {
 		return muted(`${provider} weekly reset in ${formatResetCountdown(usage.resetAtMs)}  `, theme);
@@ -885,11 +894,11 @@ function formatProviderDetail(provider: string, usage: SubscriptionUsage | null,
 	return muted(provider, theme);
 }
 
-function formatProviderDetailCompact(usage: SubscriptionUsage | null, theme?: HudTheme): string {
+function formatProviderDetailCompact(usage: SubscriptionUsage | null, theme: HudTheme): string {
 	return usage?.resetAtMs ? muted(`${formatResetCountdown(usage.resetAtMs)}  `, theme) : "";
 }
 
-function formatSessionCost(cost: number, theme?: HudTheme): string {
+function formatSessionCost(cost: number, theme: HudTheme): string {
 	const amount = Math.max(0, cost);
 	const digits = amount < 1 ? 3 : 2;
 	return muted(`$${amount.toFixed(digits)}`, theme);
@@ -1246,7 +1255,7 @@ export default function (pi: ExtensionAPI) {
 		return [];
 	}
 
-	function joinFooterDetails(parts: string[], theme?: HudTheme): string {
+	function joinFooterDetails(parts: string[], theme: HudTheme): string {
 		return parts.filter(Boolean).join(` ${muted("•", theme)} `);
 	}
 
@@ -1254,7 +1263,7 @@ export default function (pi: ExtensionAPI) {
 	 * Right side of the footer: the HUD's own provider detail, preceded by the extension statuses
 	 * that fit beside it, in order. Statuses are ancillary and must not push the detail out.
 	 */
-	function footerRight(statuses: string[], detail: string, left: string, width: number, theme?: HudTheme): string {
+	function footerRight(statuses: string[], detail: string, left: string, width: number, theme: HudTheme): string {
 		const room = width - visibleWidth(left) - 1;
 		const kept: string[] = [];
 		for (const status of statuses) {
@@ -1271,7 +1280,7 @@ export default function (pi: ExtensionAPI) {
 	function renderFooter(
 		width: number,
 		footerData: ReadonlyFooterDataProvider,
-		theme?: HudTheme,
+		theme: HudTheme,
 	): string[] {
 		if (disposed) return [""];
 		try {
@@ -1279,24 +1288,23 @@ export default function (pi: ExtensionAPI) {
 			const extensionStatuses = syncExtensionStatuses(footerData);
 
 			const band = contextBand(contextPercent, contextTokens, providerContextWindow);
-			const color = contextColor(band);
 			const pct = contextPercent === null ? "?" : `${Math.round(contextPercent)}%`;
 			const tokUsed = contextTokens === null ? "?" : fmtTokens(contextTokens);
 			const capIndicator = isContextWindowCapped(providerContextWindow, contextWindow) ? muted("↓", theme) : "";
-			const tokWindow = `${fmtTokens(contextWindow)}${capIndicator}`;
-			const contextFull = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}/${tokWindow}${RESET}`;
-			const contextCompact = `${contextBar(contextPercent, band)} ${color}${pct} ${tokUsed}${RESET}`;
+			const bar = contextBar(contextPercent, band, theme);
+			const contextFull = `${bar} ${paintContext(band, `${pct} ${tokUsed}/${fmtTokens(contextWindow)}`, theme)}${capIndicator}`;
+			const contextCompact = `${bar} ${paintContext(band, `${pct} ${tokUsed}`, theme)}`;
 
 			const cwd = currentCtx?.cwd ?? process.cwd();
 			const branch = footerData.getGitBranch();
-			const diffStats = formatDiffStats(gitAdded, gitRemoved, gitDirty);
+			const diffStats = formatDiffStats(gitAdded, gitRemoved, gitDirty, theme);
 			const location = `${displayPath(cwd)}${branch ? ` (${branch})` : ""}${diffStats}`;
 			const locationCompact = branch ? `(${branch})${diffStats}` : (diffStats.trim() || displayPath(cwd));
 			const sessionName = normalizeText(pi.getSessionName() ?? "");
 			const isFallbackSessionLabel = !sessionName && Boolean(firstUserText);
 			const sessionLabelRaw = sessionName || (firstUserText ? firstWords(firstUserText) : "");
 			const sessionLabel = sessionLabelRaw
-				? isFallbackSessionLabel ? muted(sessionLabelRaw, theme) : textColor(sessionLabelRaw, theme)
+				? isFallbackSessionLabel ? muted(sessionLabelRaw, theme) : theme.fg("text", sessionLabelRaw)
 				: "";
 			const divider = muted("│", theme);
 			const sessionDivider = muted("|", theme);

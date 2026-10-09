@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Every HUD colour now comes from Pi's active theme, so the HUD matches Pi's default `system` theme, your terminal palette and light/dark switches. The context bar and text use `success`, a success–warning blend, `warning` and `error`; git diff stats use `toolDiffAdded` and `toolDiffRemoved`; the empty bar and the dirty `~` use `dim`. Fixed RGB colours that were hard to read on light terminals and ignored 256-colour terminals are gone.
+- Requires Pi 0.99.0 or newer for `theme.colors` and `theme.style()`.
+
 ## [0.7.2] - 2026-09-30
 
 ### Added

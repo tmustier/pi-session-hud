@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import sessionHud, * as hudModule from "../pi-session-hud.js";
+import { ansiFallbackTheme } from "./theme-fixture.js";
 
 const { parseCodexBarSubscriptionUsagePayload } = hudModule;
 
@@ -33,7 +34,7 @@ function harness(oauth = true) {
 	const handlers = new Map<string, (event: any, ctx: any) => unknown>();
 	const calls: Array<{ command: string; args: string[]; options: any }> = [];
 	let output: () => Promise<any> = async () => ({ code: 0, stdout: JSON.stringify(payload), stderr: "", killed: false });
-	const theme = { fg: (_color: string, text: string) => text };
+	const theme = ansiFallbackTheme();
 	const tui = { requestRender() {} };
 	let footer: any;
 	let editor: any;
