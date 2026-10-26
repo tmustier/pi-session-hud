@@ -16,6 +16,9 @@
   "homepage": "https://github.com/tmustier/pi-session-hud",
   "files": [
     "pi-session-hud.ts",
+    "rate-limit-retry.ts",
+    "subscription-usage.ts",
+    "usage-collector.ts",
     "auto-compact-limit.ts",
     "native-compaction-limit.ts",
     "chrome-menu.ts",
@@ -29,12 +32,13 @@
   },
   "pi": {
     "extensions": [
-      "pi-session-hud.ts"
+      "pi-session-hud.ts",
+      "rate-limit-retry.ts"
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": ">=0.99.0",
+    "@earendil-works/pi-ai": ">=1.1.0",
+    "@earendil-works/pi-coding-agent": ">=1.1.0",
     "@earendil-works/pi-tui": ">=0.99.0"
   },
   "devDependencies": {

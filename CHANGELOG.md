@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add a separate, optional subscription retry extension with per-provider policies. After a rate-limit failure and fresh exhaustion reading, it waits for the reported reset and retries without adding a user message. The notice uses local reset times and supports cancellation.
+- Share subscription usage readers between the HUD and retry extension, and pause the HUD's background quota probes during a wait. Parking is unchanged.
+- Require Pi 1.1.0 or newer for the retry lifecycle hooks.
+
 ## [0.8.0] - 2026-10-09
 
 ### Changed
