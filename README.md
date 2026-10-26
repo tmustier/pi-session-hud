@@ -39,7 +39,7 @@ The editor border:
 
 ## Install
 
-Requires Pi 0.99.0 or newer, which added the theme colours the HUD uses.
+Requires Pi 1.1.0 or newer for the optional subscription retry extension and its lifecycle hooks.
 
 Install from npm:
 
@@ -103,6 +103,46 @@ The HUD and auto-compact communicate through Pi's shared extension event bus. Th
 Git state refreshes at session start and after each agent run, not while idle.
 
 Mouse clicks are only delivered in Pi's fullscreen TUI mode; in regular mode the terminal owns the scrollback and Pi does not capture mouse input. Hover needs pointer-motion reporting, which Pi turns off inside tmux, zellij and screen to keep those multiplexers responsive; there the model and thinking popups still open on click. The speed label still cycles on click; use `/fast on`, `/fast off` or `/fast ultrafast` to choose a mode when hover is unavailable.
+
+## Optional subscription retry waiting
+
+The package includes a separate `rate-limit-retry.ts` extension. Waiting is off unless you configure a provider. It works without the HUD, and `/hud` does not toggle it. Use Pi's extension selection to exclude either extension independently.
+
+Create `~/.pi/agent/pi-rate-limit-retry.json` (or place the file in your `PI_CODING_AGENT_DIR`):
+
+```json
+{
+  "enabled": true,
+  "providers": {
+    "anthropic": { "behavior": "wait-until-reset" },
+    "openai-codex": { "behavior": "wait-until-reset" },
+    "openai": {
+      "behavior": "wait-until-reset",
+      "allowCodexBarInference": true
+    }
+  }
+}
+```
+
+Include only the providers you want to wait for. Omitted providers and `"behavior": "normal-retry"` keep Pi's ordinary retries. For `openai`, `allowCodexBarInference` explicitly permits using CodexBar's selected account after Pi reports a rate limit. Its account can differ from Pi's, so the notice labels that reset as inferred. Without that option, CodexBar readings do not trigger waiting. API-key sessions never use subscription waiting.
+
+Run `/reload` after editing the file. `/rate-limit-retry` or `/rate-limit-retry status` shows the current policies. `/rate-limit-retry off` cancels a current wait and disables waiting for this session; `on` enables the configured policies again. A missing or invalid file leaves waiting off.
+
+After a rate-limit failure, the extension requests fresh usage. If an unrounded usage value is 100% and has a future reset time, it displays a notice above the editor:
+
+```text
+Your Anthropic subscription has reached its 5-hour usage limit.
+Pi will retry after usage resets at 19:21 GMT today.
+Resets in 47 minutes. Esc to cancel waiting.
+```
+
+The reset time uses your local timezone, including daylight saving time. Escape, an SDK/RPC abort, a model switch, session replacement or reload cancels waiting. Follow-up messages keep Pi's normal queueing behaviour; press Escape first to cancel a wait. Cancelling does not submit another user prompt. The native retry path retains Pi's short backoff after the reset. Explicit subscription errors that Pi would not retry use its public settlement continuation hook instead. Both paths respect `retry.enabled` and the same `retry.maxRetries` budget.
+
+If both five-hour and weekly windows are exhausted, the extension refreshes at the earliest reset and checks whether another window still blocks access. It does not assume that the windows reset together. Missing usage, unknown restrictions, failed refreshes and missing reset times fall back to Pi's normal failure handling. Billing and workplace-admin limits do not trigger subscription waiting. The current readers cover the general weekly and five-hour windows, not every possible model-specific allowance.
+
+Successful model requests add no quota fetch. While waiting, the spinner is hidden, a single timer wakes for minute-level countdown changes or the reset, and the HUD's periodic quota probes are paused. Pi stays running and retains its memory. No parking behaviour changes are included, and waiting is not restored after process exit.
+
+For local development, load the retry extension explicitly with `pi -e ./rate-limit-retry.ts`. Add `-e ./pi-session-hud.ts` if you also want the HUD.
 
 ## Chrome menus for other extensions
 
