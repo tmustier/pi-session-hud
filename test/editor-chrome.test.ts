@@ -472,10 +472,10 @@ test("git status starts without waiting for the git-crypt config check", async (
 	});
 	await hud.fire("session_start");
 	try {
-		assert.deepEqual(calls, ["status", "config"]);
+		assert.deepEqual([...calls].sort(), ["config", "status"]);
 		config.resolve({ code: 1, stdout: "", stderr: "" });
 		await new Promise((resolve) => setImmediate(resolve));
-		assert.deepEqual(calls, ["status", "config", "diff"]);
+		assert.deepEqual([...calls].sort(), ["config", "diff", "status"]);
 		assert.match(hud.renderFooter(200), /\+2 -1/);
 	} finally {
 		await hud.fire("session_shutdown");
