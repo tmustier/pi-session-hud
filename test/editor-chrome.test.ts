@@ -151,7 +151,7 @@ type FakePopup = { component: ChromePopup; options: unknown };
 
 function installHud(
 	thinking: string,
-	options: { oauth?: boolean; capturePress?: boolean; reasoning?: boolean; scoped?: Array<{ model: FakeModel; thinkingLevel?: string }> } = {},
+	options: { oauth?: boolean; capturePress?: boolean; reasoning?: boolean; scoped?: Array<{ model: FakeModel; thinkingLevel?: string }>; exec?: (command: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }> } = {},
 ) {
 	const handlers = new Map<string, Handler[]>();
 	const actions: string[] = [];
@@ -193,7 +193,7 @@ function installHud(
 	const pi = {
 		on: (event: string, handler: Handler) => { handlers.set(event, [...(handlers.get(event) ?? []), handler]); },
 		events: bus,
-		exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+		exec: options.exec ?? (async () => ({ code: 1, stdout: "", stderr: "" })),
 		registerCommand() {},
 		getThinkingLevel: () => thinking,
 		setThinkingLevel: (level: string) => { thinking = level; changes.push(`thinking:${level}`); },
@@ -457,6 +457,29 @@ test("popup items and geometry", () => {
 	// Right edge on the frame's right edge, bottom edge on the row above the frame; clamped to the terminal.
 	assert.deepEqual(popupPosition({ screenX: 43, screenY: 30, x: 40, y: 0 }, 60, { width: 20, height: 5 }, { columns: 120, rows: 40 }), { row: 25, col: 43 });
 	assert.deepEqual(popupPosition({ screenX: 43, screenY: 3, x: 40, y: 0 }, 60, { width: 80, height: 5 }, { columns: 70, rows: 40 }), { row: 0, col: 0 });
+});
+
+test("git status starts without waiting for the git-crypt config check", async () => {
+	const calls: string[] = [];
+	const config = deferred<{ code: number; stdout: string; stderr: string }>();
+	const hud = installHud("medium", {
+		exec: (command, args) => {
+			calls.push(args[0]!);
+			if (args[0] === "config") return config.promise;
+			if (args[0] === "status") return Promise.resolve({ code: 0, stdout: " M file\n", stderr: "" });
+			return Promise.resolve({ code: 0, stdout: " 1 file changed, 2 insertions(+), 1 deletion(-)\n", stderr: "" });
+		},
+	});
+	await hud.fire("session_start");
+	try {
+		assert.deepEqual([...calls].sort(), ["config", "status"]);
+		config.resolve({ code: 1, stdout: "", stderr: "" });
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual([...calls].sort(), ["config", "diff", "status"]);
+		assert.match(hud.renderFooter(200), /\+2 -1/);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
 });
 
 test("keeps a subscription usage probe result even when other events fire while it is in flight", async () => {
