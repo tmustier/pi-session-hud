@@ -897,6 +897,12 @@ export default function (pi: ExtensionAPI) {
 		const generation = sessionGeneration;
 		try {
 			const cwd = ctx.cwd;
+			// Status does not depend on the git-crypt check; only the diff does.
+			const statusPromise = pi.exec(
+				"git",
+				["status", "--porcelain"],
+				{ cwd, timeout: GIT_COMMAND_TIMEOUT_MS },
+			).catch(() => undefined);
 			const configResult = await pi.exec(
 				"git",
 				["config", "--local", "--get", "filter.git-crypt.clean"],
@@ -905,11 +911,6 @@ export default function (pi: ExtensionAPI) {
 			if (disposed || generation !== sessionGeneration) return;
 			const dirtyOnly = configResult?.code === 0 && Boolean(configResult.stdout.trim());
 
-			const statusPromise = pi.exec(
-				"git",
-				["status", "--porcelain"],
-				{ cwd, timeout: GIT_COMMAND_TIMEOUT_MS },
-			).catch(() => undefined);
 			const diffPromise = dirtyOnly
 				? Promise.resolve(undefined)
 				: pi.exec(
