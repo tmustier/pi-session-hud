@@ -113,6 +113,7 @@ export type ChromeLayout = {
 	lineCount: number;
 	hotspots: ChromeHotspot[];
 };
+type GitRefresh = "idle" | "running" | "queued";
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 type InstalledEditor = {
 	factory: EditorFactory;
@@ -756,8 +757,8 @@ export default function (pi: ExtensionAPI) {
 	let gitAdded = 0;
 	let gitRemoved = 0;
 	let gitDirty = false;
-	let gitRefreshInFlight = false;
-	let gitRefreshPending = false;
+	/** "queued": a refresh was requested while one ran, so one rerun follows it. */
+	let gitRefresh: GitRefresh = "idle";
 	let subscriptionProbeTimer: ReturnType<typeof setInterval> | null = null;
 	let currentCtx: ExtensionContext | null = null;
 	let firstUserText: string | null = null;
@@ -766,7 +767,8 @@ export default function (pi: ExtensionAPI) {
 	let installedEditor: InstalledEditor | null = null;
 	let latestSubscriptionUsage: SubscriptionUsage | null = null;
 	let lastSubscriptionProbeAt = 0;
-	let disposed = false;
+	/** True only between install and teardown; never installed without a UI. */
+	let running = false;
 	// Pi builds a fresh ExtensionContext per event, so async work compares this
 	// generation instead of ctx identity to detect a replaced session.
 	let sessionGeneration = 0;
@@ -865,7 +867,7 @@ export default function (pi: ExtensionAPI) {
 		const provider = ctx?.model?.provider;
 		if (
 			!ctx ||
-			disposed ||
+			!running ||
 			!SUPPORTED_SUBSCRIPTION_USAGE_PROVIDERS.has(provider ?? "") ||
 			!isUsingSubscriptionAuth(ctx) ||
 			(!force && (usageCollector.backgroundPaused || Date.now() - lastSubscriptionProbeAt < SUBSCRIPTION_USAGE_PROBE_MIN_INTERVAL_MS))
@@ -876,7 +878,7 @@ export default function (pi: ExtensionAPI) {
 		const observation = await usageCollector.refresh(ctx, provider!).catch(() => null);
 		const usage = observation?.usage ?? null;
 		// A probe started before a model switch must not overwrite the new provider's quota.
-		if (disposed || generation !== sessionGeneration || provider !== currentCtx?.model?.provider) return;
+		if (!running || generation !== sessionGeneration || provider !== currentCtx?.model?.provider) return;
 		// A missing/failed optional CodexBar must not leave its last quota looking current.
 		if (provider === "openai" && !usage) {
 			latestSubscriptionUsage = null;
@@ -887,13 +889,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function refreshGit(ctx: ExtensionContext | null = currentCtx) {
-		if (!ctx || disposed) return;
-		if (gitRefreshInFlight) {
-			gitRefreshPending = true;
+		if (!ctx || !running) return;
+		if (gitRefresh !== "idle") {
+			gitRefresh = "queued";
 			return;
 		}
 
-		gitRefreshInFlight = true;
+		gitRefresh = "running";
 		const generation = sessionGeneration;
 		try {
 			const cwd = ctx.cwd;
@@ -908,7 +910,7 @@ export default function (pi: ExtensionAPI) {
 				["config", "--local", "--get", "filter.git-crypt.clean"],
 				{ cwd, timeout: GIT_COMMAND_TIMEOUT_MS },
 			).catch(() => undefined);
-			if (disposed || generation !== sessionGeneration) return;
+			if (!running || generation !== sessionGeneration) return;
 			const dirtyOnly = configResult?.code === 0 && Boolean(configResult.stdout.trim());
 
 			const diffPromise = dirtyOnly
@@ -920,7 +922,7 @@ export default function (pi: ExtensionAPI) {
 				).catch(() => undefined);
 			const [statusResult, diffResult] = await Promise.all([statusPromise, diffPromise]);
 
-			if (disposed || generation !== sessionGeneration) return;
+			if (!running || generation !== sessionGeneration) return;
 			const valid = statusResult?.code === 0 && (dirtyOnly || diffResult?.code === 0);
 			const parsed = valid ? parseGitShortstat(diffResult?.stdout ?? "") : { added: 0, removed: 0 };
 			gitAdded = parsed.added;
@@ -928,10 +930,10 @@ export default function (pi: ExtensionAPI) {
 			gitDirty = valid && Boolean(statusResult?.stdout.trim());
 			footerTui?.requestRender();
 		} finally {
-			gitRefreshInFlight = false;
-			const refreshAgain = gitRefreshPending;
-			gitRefreshPending = false;
-			if (refreshAgain && !disposed) void refreshGit();
+			// A concurrent call may have queued a rerun; TypeScript cannot see that across the await.
+			const refreshAgain = (gitRefresh as GitRefresh) === "queued";
+			gitRefresh = "idle";
+			if (refreshAgain) void refreshGit();
 		}
 	}
 
@@ -1001,7 +1003,7 @@ export default function (pi: ExtensionAPI) {
 		footerData: ReadonlyFooterDataProvider,
 		theme: Theme,
 	): string[] {
-		if (disposed) return [""];
+		if (!running) return [""];
 		try {
 			refreshContext();
 			const extensionStatuses = syncExtensionStatuses(footerData);
@@ -1085,8 +1087,7 @@ export default function (pi: ExtensionAPI) {
 		requestAutoCompactPolicy(ctx);
 		pi.events.emit(CHROME_MENU_REQUEST_EVENT, { protocolVersion: 1 });
 
-		disposed = false;
-		gitRefreshPending = false;
+		running = true;
 		void refreshGit(ctx);
 		clearSubscriptionProbe();
 		latestSubscriptionUsage = null;
@@ -1101,7 +1102,7 @@ export default function (pi: ExtensionAPI) {
 				render: (width: number) => renderFooter(width, footerData, theme),
 				invalidate() {},
 				dispose() {
-					disposed = true;
+					running = false;
 					footerTui = null;
 					clearSubscriptionProbe();
 					unsubscribeBranch();
@@ -1461,17 +1462,24 @@ export default function (pi: ExtensionAPI) {
 		requestChromeRender();
 	}
 
+	/** Undo install; returns the editor it wrapped so a toggle can hand the slot back. */
+	function teardown(): InstalledEditor | null {
+		const editor = installedEditor;
+		sessionGeneration++;
+		running = false;
+		clearSubscriptionProbe();
+		editor?.disable();
+		installedEditor = null;
+		footerTui = null;
+		editorTui = null;
+		return editor;
+	}
+
 	pi.on("session_start", async (_event, ctx) => { install(ctx); });
 	pi.on("session_shutdown", async () => {
 		unregisterAutoCompactPolicy();
 		unregisterChromeMenus();
-		sessionGeneration++;
-		disposed = true;
-		clearSubscriptionProbe();
-		installedEditor?.disable();
-		installedEditor = null;
-		footerTui = null;
-		editorTui = null;
+		teardown();
 	});
 	pi.on("agent_start", async (_event, ctx) => { refreshAndRender(ctx); });
 	pi.on("before_provider_request", (event, ctx) => {
@@ -1485,7 +1493,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (speedMode === lastRequestSpeedMode) return;
 		lastRequestSpeedMode = speedMode;
-		if (!disposed) editorTui?.requestRender();
+		if (running) editorTui?.requestRender();
 	});
 	pi.on("agent_end", async (_event, ctx) => {
 		refreshAndRender(ctx);
@@ -1517,17 +1525,11 @@ export default function (pi: ExtensionAPI) {
 			install(ctx);
 			ctx.ui.notify("Session HUD enabled", "info");
 		} else {
-			sessionGeneration++;
-			disposed = true;
-			clearSubscriptionProbe();
-			footerTui = null;
-			editorTui = null;
+			const editor = teardown();
 			ctx.ui.setFooter(undefined);
-			installedEditor?.disable();
-			if (installedEditor && ctx.ui.getEditorComponent() === installedEditor.factory) {
-				ctx.ui.setEditorComponent(installedEditor.previousFactory);
+			if (editor && ctx.ui.getEditorComponent() === editor.factory) {
+				ctx.ui.setEditorComponent(editor.previousFactory);
 			}
-			installedEditor = null;
 			ctx.ui.notify("Session HUD disabled", "info");
 		}
 	}

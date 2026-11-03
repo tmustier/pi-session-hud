@@ -96,6 +96,8 @@ export default function rateLimitRetry(pi: ExtensionAPI) {
 	let pending: { message: AssistantMessage; entryId: string } | undefined;
 	let active: { controller: AbortController; ctx: ExtensionContext; generation: number } | undefined;
 	let unsubscribeInput: (() => void) | undefined;
+	// The retry budget spans one agent run, including our settlement continuations.
+	const resetRun = () => { failures = 0; settlementRetries = 0; pending = undefined; };
 
 	const cancel = () => {
 		if (!active) return;
@@ -154,7 +156,7 @@ export default function rateLimitRetry(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		generation++;
-		failures = 0; settlementRetries = 0; pending = undefined;
+		resetRun();
 		try { config = parseRetryConfig(JSON.parse(readFileSync(join(getAgentDir(), CONFIG_NAME), "utf8"))); }
 		catch (error) {
 			config = { enabled: false, providers: {} };
@@ -169,13 +171,13 @@ export default function rateLimitRetry(pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => { cancel(); generation++; active = undefined; pending = undefined; unsubscribeInput?.(); unsubscribeInput = undefined; });
 	pi.on("model_select", () => { cancel(); pending = undefined; });
 	pi.on("cache_warming_decision", () => active ? { action: "stop" } : undefined);
-	pi.on("before_agent_start", () => { failures = 0; settlementRetries = 0; pending = undefined; });
-	pi.on("agent_settled", () => { failures = 0; settlementRetries = 0; pending = undefined; });
+	pi.on("before_agent_start", resetRun);
+	pi.on("agent_settled", resetRun);
 
 	pi.on("turn_end", async (event, ctx) => {
 		const message = event.message;
 		if (message.role !== "assistant") return;
-		if (message.stopReason !== "error") { failures = 0; settlementRetries = 0; pending = undefined; return; }
+		if (message.stopReason !== "error") { resetRun(); return; }
 		const failedModel = ctx.modelRegistry.find(message.provider, message.model) ?? ctx.model;
 		// Overflow has its own compact-and-retry path, outside the transient retry budget.
 		if (isContextOverflow(message, failedModel?.contextWindow ?? 0)) return;

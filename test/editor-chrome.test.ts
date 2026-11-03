@@ -151,7 +151,7 @@ type FakePopup = { component: ChromePopup; options: unknown };
 
 function installHud(
 	thinking: string,
-	options: { oauth?: boolean; capturePress?: boolean; reasoning?: boolean; scoped?: Array<{ model: FakeModel; thinkingLevel?: string }>; exec?: (command: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }> } = {},
+	options: { oauth?: boolean; capturePress?: boolean; reasoning?: boolean; scoped?: Array<{ model: FakeModel; thinkingLevel?: string }>; hasUI?: boolean; exec?: (command: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }> } = {},
 ) {
 	const handlers = new Map<string, Handler[]>();
 	const actions: string[] = [];
@@ -206,7 +206,7 @@ function installHud(
 	const footerTheme = ansiFallbackTheme();
 	// Pi creates a fresh ExtensionContext object for every event it emits.
 	const createCtx = () => ({
-		hasUI: true,
+		hasUI: options.hasUI ?? true,
 		cwd: "/tmp",
 		model,
 		isProjectTrusted: () => true,
@@ -477,6 +477,53 @@ test("git status starts without waiting for the git-crypt config check", async (
 		await new Promise((resolve) => setImmediate(resolve));
 		assert.deepEqual([...calls].sort(), ["config", "diff", "status"]);
 		assert.match(hud.renderFooter(200), /\+2 -1/);
+	} finally {
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("without a UI the HUD never installs, so agent turns run no git or quota probes", async () => {
+	const calls: string[] = [];
+	const hud = installHud("medium", {
+		oauth: true,
+		hasUI: false,
+		exec: async (command) => { calls.push(command); return { code: 0, stdout: "", stderr: "" }; },
+	});
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = (async () => { calls.push("fetch"); return new Response("{}"); }) as typeof fetch;
+	try {
+		await hud.fire("session_start");
+		await hud.fire("agent_end");
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(calls, []);
+	} finally {
+		globalThis.fetch = realFetch;
+		await hud.fire("session_shutdown");
+	}
+});
+
+test("git refreshes requested while one runs collapse into a single rerun", async () => {
+	const statuses: Array<ReturnType<typeof deferred<{ code: number; stdout: string; stderr: string }>>> = [];
+	const hud = installHud("medium", {
+		exec: (_command, args) => {
+			if (args[0] !== "status") return Promise.resolve({ code: 1, stdout: "", stderr: "" });
+			const status = deferred<{ code: number; stdout: string; stderr: string }>();
+			statuses.push(status);
+			return status.promise;
+		},
+	});
+	const settle = () => new Promise((resolve) => setImmediate(resolve));
+	await hud.fire("session_start");
+	try {
+		await hud.fire("agent_end");
+		await hud.fire("agent_end");
+		assert.equal(statuses.length, 1);
+		statuses[0]!.resolve({ code: 0, stdout: "", stderr: "" });
+		await settle();
+		assert.equal(statuses.length, 2);
+		statuses[1]!.resolve({ code: 0, stdout: "", stderr: "" });
+		await settle();
+		assert.equal(statuses.length, 2);
 	} finally {
 		await hud.fire("session_shutdown");
 	}
