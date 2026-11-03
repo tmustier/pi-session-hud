@@ -6,6 +6,7 @@
 - Share subscription usage readers between the HUD and retry extension, and pause the HUD's background quota probes during a wait. Parking is unchanged.
 - Require Pi 1.1.0 or newer for the retry lifecycle hooks.
 - Start `git status` alongside the git-crypt config check instead of after it, so footer git stats refresh one command sooner.
+- Stop running git and quota probes after agent turns when Pi has no UI (for example `pi -p`), where the HUD never installs.
 
 ## [0.8.0] - 2026-10-09
 
