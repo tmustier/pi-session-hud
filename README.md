@@ -184,13 +184,11 @@ On narrow terminals the footer collapses gracefully: context + repo/branch/diff 
 
 ## Changelog
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for the full history. Pi 1.5 and later use
-[`UPDATE_NOTES.md`](./UPDATE_NOTES.md) for short startup notices after updates.
-The first launch records the version without showing old notes. Pi's
-`collapseChangelog` setting reduces notices to one line per package.
+See [`CHANGELOG.md`](./CHANGELOG.md) for the full history. Pi 1.5 and later show
+short startup notices from [`UPDATE_NOTES.md`](./UPDATE_NOTES.md). The first
+launch is silent; `collapseChangelog` reduces notices to one line per package.
 
-Pi shows notes for the whole package, even when only the HUD or retry extension
-is loaded. Startup notes therefore cover only changes that affect both
-extensions. Changes to either extension alone stay in the full changelog.
-When releasing, add startup notes only for meaningful shared changes or required
-actions. Skip releases that do not need a notice, and keep the detailed history.
+Pi cannot filter notes by loaded extensions, so startup notes cover only changes
+affecting both the HUD and retry extension. When releasing, add short notes for
+meaningful shared changes or required actions under released `## [x.y.z]`
+headings. Leave out entries for releases that do not need a notice.
