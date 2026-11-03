@@ -24,13 +24,15 @@
     "chrome-menu.ts",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "UPDATE_NOTES.md"
   ],
   "scripts": {
     "check": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts"
   },
   "pi": {
+    "changelogPath": "./UPDATE_NOTES.md",
     "extensions": [
       "pi-session-hud.ts",
       "rate-limit-retry.ts"
