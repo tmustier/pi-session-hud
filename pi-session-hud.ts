@@ -933,7 +933,7 @@ export default function (pi: ExtensionAPI) {
 			// A concurrent call may have queued a rerun; TypeScript cannot see that across the await.
 			const refreshAgain = (gitRefresh as GitRefresh) === "queued";
 			gitRefresh = "idle";
-			if (refreshAgain && running) void refreshGit();
+			if (refreshAgain) void refreshGit();
 		}
 	}
 
