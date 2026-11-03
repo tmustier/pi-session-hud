@@ -1,12 +1,25 @@
 # Changelog
 
-## Unreleased
+## [0.9.0] - 2026-11-03
 
-- Add a separate, optional subscription retry extension with per-provider policies. After a rate-limit failure and fresh exhaustion reading, it waits for the reported reset and retries without adding a user message. The notice uses local reset times and supports cancellation.
-- Share subscription usage readers between the HUD and retry extension, and pause the HUD's background quota probes during a wait. Parking is unchanged.
-- Require Pi 1.1.0 or newer for the retry lifecycle hooks.
-- Start `git status` alongside the git-crypt config check instead of after it, so footer git stats refresh one command sooner.
+Bug fixes and performance improvements.
+
+### Fixed
+
 - Stop running git and quota probes after agent turns when Pi has no UI (for example `pi -p`), where the HUD never installs.
+
+### Performance
+
+- Start `git status` alongside the git-crypt config check instead of after it, so footer git stats refresh one command sooner.
+
+### Added
+
+- A separate, optional subscription retry extension with per-provider policies. After a rate-limit failure and fresh exhaustion reading, it waits for the reported reset and retries without adding a user message. The notice uses local reset times and supports cancellation.
+- The HUD and the retry extension share subscription usage readers, and the HUD's background quota probes pause during a wait. Parking is unchanged.
+
+### Changed
+
+- Requires Pi 1.1.0 or newer for the retry lifecycle hooks.
 
 ## [0.8.0] - 2026-10-09
 
